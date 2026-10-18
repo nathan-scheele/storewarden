@@ -178,7 +178,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 
 - JSON Lines written to `--audit-log` (path, or `-` for stdout; the default is `-`). This is separate from the operational logs, which go to stderr.
 - **Records:** one per denial. For an allowed call, an `attempt` record before Shopify is called and a `result` record after.
-- **Fail closed:** if the `attempt` record can't be written, the call is refused. If the `result` record can't be written, an error is logged and `/healthz` turns unhealthy.
+- **Fail closed:** if the `attempt` record can't be written, the call is refused. Any record that can't be written, whether a denial, an attempt or a result, is logged as an error and turns `/healthz` unhealthy until restart: the audit trail is broken either way.
 - **Fields:**
   - time, `request_id`, `phase` (`denied`, `attempt` or `result`)
   - caller: `node_id`, `node_name`, `tags`, `user`
