@@ -184,10 +184,10 @@ Write tools are guarded by two keys. They are only registered when the server st
   - caller: `node_id`, `node_name`, `tags`, `user`
   - `tool`, `args`, `decision`, `reason`
   - `dry_run`, `idempotency_key`
-  - `outcome`, `error`
+  - `outcome`, `error`. A Shopify error (GraphQL errors or `userErrors`) is recorded as storewarden's wording plus Shopify's error codes, without Shopify's messages, which can quote Store data. The Caller's Tool error keeps the messages.
   - shopify: `requested_cost`, `actual_cost`, `request_id`. Costs are summed over every response Shopify sent for the call, so a throttled request and its retry both count; `request_id` is the last response's.
   - `duration_ms`
-- **Never logged:** Shopify response bodies (they can contain customer data) and credentials.
+- **Never logged:** Shopify response bodies and error messages (they can contain customer data) and credentials.
 
 ## Process
 

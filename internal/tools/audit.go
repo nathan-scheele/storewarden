@@ -88,11 +88,15 @@ func writeArgs(args json.RawMessage) (dryRun bool, idempotencyKey string) {
 // outcome describes how a call ended, for the result record.
 func outcome(res mcp.Result, err error) (string, string) {
 	if err != nil {
-		return audit.Failed, err.Error()
+		return audit.Failed, auditError(err)
 	}
 	if r, ok := res.(*mcp.CallToolResult); ok && r.IsError {
-		// A Tool's error comes back as text content (see the SDK's
-		// toolForErr).
+		// On the server, the result keeps the Tool's own error.
+		if toolErr := r.GetError(); toolErr != nil {
+			return audit.Failed, auditError(toolErr)
+		}
+		// Otherwise the error is only the result's text content (see the
+		// SDK's toolForErr).
 		var msgs []string
 		for _, c := range r.Content {
 			if t, ok := c.(*mcp.TextContent); ok {
@@ -102,6 +106,21 @@ func outcome(res mcp.Result, err error) (string, string) {
 		return audit.Failed, strings.Join(msgs, "; ")
 	}
 	return audit.OK, ""
+}
+
+// auditError returns err as the result record shows it. Shopify's errors
+// are recorded by their codes only: their messages can quote the Store's
+// data, which Audit records never hold. The Caller still gets the messages.
+func auditError(err error) string {
+	var graphQLErrs shopify.GraphQLErrors
+	if errors.As(err, &graphQLErrs) {
+		return "shopify: graphql errors, codes: " + graphQLErrs.Codes()
+	}
+	var userErrs shopify.UserErrors
+	if errors.As(err, &userErrs) {
+		return "shopify: user errors, codes: " + userErrs.Codes()
+	}
+	return err.Error()
 }
 
 // shopifyUsage adds up what Shopify reports about the queries one call makes.

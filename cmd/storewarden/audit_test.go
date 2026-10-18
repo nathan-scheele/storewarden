@@ -283,3 +283,53 @@ func TestRecordsHoldNoResponseBodiesOrCredentials(t *testing.T) {
 		}
 	}
 }
+
+// Shopify's error messages can quote the Store's data, so a failed call's
+// result record keeps Shopify's error codes but not its messages. These
+// responses are built here, not recorded: each carries a recognisable
+// message.
+func TestErrorRecordsHoldShopifyCodesButNotItsMessages(t *testing.T) {
+	const marker = "ERROR-MESSAGE-MARKER"
+	tests := map[string]struct {
+		fixture  string // the recording whose query is answered
+		response string
+		tool     string
+		args     map[string]any
+		code     string
+	}{
+		"GraphQL error": {
+			fixture:  "shop",
+			response: `{"errors": [{"message": "` + marker + `", "extensions": {"code": "INTERNAL_SERVER_ERROR"}}]}`,
+			tool:     "get_shop",
+			code:     "INTERNAL_SERVER_ERROR",
+		},
+		"user error": {
+			fixture:  "set_inventory_quantity_applied",
+			response: `{"data": {"inventorySetQuantities": {"inventoryAdjustmentGroup": null, "userErrors": [{"field": ["input"], "message": "` + marker + `", "code": "INVALID_LOCATION"}]}}}`,
+			tool:     "set_inventory_quantity",
+			args:     realWrite(),
+			code:     "INVALID_LOCATION",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, grantedTo(`{"tools":["get_shop","set_inventory_quantity"]}`))
+			h.store.answer(h.store.recorded(t, tt.fixture).query, []byte(tt.response))
+
+			callToolError(t, h.connect(t), tt.tool, tt.args)
+
+			recs := h.audit.records(t)
+			if len(recs) != 2 {
+				t.Fatalf("got %d audit records, want attempt and result:\n%s", len(recs), h.audit)
+			}
+			result := recs[1]
+			checkFields(t, result, map[string]any{"outcome": "error"})
+			if got, _ := result["error"].(string); !strings.Contains(got, tt.code) {
+				t.Errorf("result error = %q, want Shopify's code %s", got, tt.code)
+			}
+			if strings.Contains(h.audit.String(), marker) {
+				t.Errorf("audit records contain Shopify's message:\n%s", h.audit)
+			}
+		})
+	}
+}

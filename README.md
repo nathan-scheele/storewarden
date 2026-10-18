@@ -370,7 +370,7 @@ The root of trust is the tailnet policy file. Anyone who can edit it can grant t
 | Public exposure | The only listener is tsnet's, inside the tailnet. No Funnel, serve config or host listener in the code, and `make never-public` fails the build if one appears. tsnet clears any saved serve config when the node starts. storewarden is built without tsnet's peer API server, which would otherwise listen on every host interface, and refuses to start if it isn't ([ADR 0003](docs/adr/0003-build-without-the-peer-api-server.md)). |
 | Credential leak | Secrets come only from the environment and are never logged or written to Audit records. The access token is kept only in memory. The app has no customer or order scopes. |
 | An action that isn't audited | Audit records fail closed: a call whose attempt record can't be written is refused. |
-| Customer data in the audit trail | Shopify response bodies are never written to Audit records. |
+| Customer data in the audit trail | Shopify response bodies, and the messages in Shopify's errors, are never written to Audit records. Errors are recorded by their codes. |
 
 ### Accepted risks
 
@@ -419,13 +419,13 @@ Audit records are JSON Lines, one record per line. They go to stdout by default,
 | `dry_run` | For the Write tool, whether the call was a Dry run. `false` for Read tools. |
 | `idempotency_key` | For the Write tool, the Idempotency key, if any. |
 | `outcome` | On a `result` record, `ok` or `error`. |
-| `error` | The error the Caller got, if any. |
+| `error` | The error the Caller got, if any. A Shopify error is recorded by its codes only, such as `shopify: user errors, codes: INVALID_LOCATION`, because its message can quote Store data; the Caller still gets the message. |
 | `shopify.requested_cost` | Shopify's estimated query cost, summed over every request the call sent, including a throttled request and its retry. |
 | `shopify.actual_cost` | Shopify's actual query cost, summed the same way. A throttled request costs nothing. |
 | `shopify.request_id` | Shopify's `X-Request-Id` for the call's last request. |
 | `duration_ms` | On a `result` record, how long the call took. |
 
-The `shopify` object appears only once Shopify has answered. Shopify response bodies and credentials are never recorded. Arguments are recorded as sent, so Callers shouldn't put secrets in them.
+The `shopify` object appears only once Shopify has answered. Shopify response bodies, Shopify error messages and credentials are never recorded. Arguments are recorded as sent, so Callers shouldn't put secrets in them.
 
 Names and tags are recorded for the audit trail only. storewarden never uses them to authorize.
 

@@ -24,6 +24,16 @@ func (e GraphQLErrors) Error() string {
 	return "shopify: graphql: " + strings.Join(msgs, "; ")
 }
 
+// Codes returns the errors' codes, comma-separated, without Shopify's
+// messages, which can quote the Store's data.
+func (e GraphQLErrors) Codes() string {
+	codes := make([]string, len(e))
+	for i, ge := range e {
+		codes[i] = ge.Code
+	}
+	return joinCodes(codes)
+}
+
 // has reports whether any of the errors has the given code.
 func (e GraphQLErrors) has(code string) bool {
 	for _, ge := range e {
@@ -52,6 +62,25 @@ func (e UserErrors) Error() string {
 		msgs[i] = ue.Message
 	}
 	return "shopify: user errors: " + strings.Join(msgs, "; ")
+}
+
+// Codes returns the user errors' codes, like GraphQLErrors.Codes.
+func (e UserErrors) Codes() string {
+	codes := make([]string, len(e))
+	for i, ue := range e {
+		codes[i] = ue.Code
+	}
+	return joinCodes(codes)
+}
+
+// joinCodes joins error codes with commas, showing a missing one as "none".
+func joinCodes(codes []string) string {
+	for i, c := range codes {
+		if c == "" {
+			codes[i] = "none"
+		}
+	}
+	return strings.Join(codes, ", ")
 }
 
 // findUserErrors returns the user errors in a response's data. A mutation's
