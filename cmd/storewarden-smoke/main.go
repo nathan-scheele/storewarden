@@ -3,9 +3,9 @@
 // ephemeral, tagged node, prints the tailnet's name as one JSON line, then
 // reads commands from stdin, one per line, and answers each with one JSON
 // line. "check" calls storewarden once, as an MCP client. "tools",
-// "move ITEM LOCATION" and "read-only" run Part 2 of the smoke test
-// (tools.go and move.go). It stops at the end of stdin and removes its node
-// from the tailnet.
+// "move ITEM LOCATION", "read-only", "quota" and "quota-other" run Part 2 of
+// the smoke test (tools.go, move.go, quota.go). It stops at the end of stdin
+// and removes its node from the tailnet.
 package main
 
 import (
@@ -101,19 +101,28 @@ func run() error {
 	base := "http://" + *target
 	in := bufio.NewScanner(os.Stdin)
 	for in.Scan() {
-		// A command is one word, and "move" also takes the inventory item
-		// and the location to move it at.
-		fields := strings.Fields(in.Text())
-		switch {
-		case in.Text() == "check":
+		// "quota" and "quota-other" take an inventory item ID after a space,
+		// and "move" an inventory item ID and a location ID.
+		command, item, _ := strings.Cut(in.Text(), " ")
+		switch command {
+		case "check":
 			err = out.Encode(check(ctx, hc, base))
-		case in.Text() == "tools":
+		case "tools":
 			err = out.Encode(withSession(ctx, hc, base, runTools))
-		case in.Text() == "read-only":
+		case "read-only":
 			err = out.Encode(withSession(ctx, hc, base, runReadOnly))
-		case len(fields) == 3 && fields[0] == "move":
+		case "move":
+			item, location, _ := strings.Cut(item, " ")
 			err = out.Encode(withSession(ctx, hc, base, func(ctx context.Context, s session) scenario {
-				return runMove(ctx, s, fields[1], fields[2])
+				return runMove(ctx, s, item, location)
+			}))
+		case "quota":
+			err = out.Encode(withSession(ctx, hc, base, func(ctx context.Context, s session) scenario {
+				return runQuota(ctx, s, item)
+			}))
+		case "quota-other":
+			err = out.Encode(withSession(ctx, hc, base, func(ctx context.Context, s session) scenario {
+				return runQuotaOther(ctx, s, item)
 			}))
 		default:
 			err = out.Encode(map[string]string{"error": "unknown command " + in.Text()})

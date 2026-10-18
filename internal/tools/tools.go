@@ -29,7 +29,7 @@ type tool struct {
 var all = []tool{
 	readTool(&mcp.Tool{
 		Name:        "get_shop",
-		Description: "Get the Store's name, myshopify domain, plan and currency, and Shopify's current rate limit status.",
+		Description: "Get the Store's name, myshopify domain, plan and currency, Shopify's current rate limit status for the Store, and your own Quota of that rate limit.",
 	}, getShop),
 	readTool(&mcp.Tool{
 		Name:        "search_products",
@@ -133,6 +133,7 @@ type Shop struct {
 	Plan            string          `json:"plan"`
 	Currency        string          `json:"currency"`
 	ThrottleStatus  *ThrottleStatus `json:"throttle_status,omitempty" jsonschema:"Shopify's query cost bucket, if Shopify reported it"`
+	Quota           *Quota          `json:"quota,omitempty" jsonschema:"your own share of Shopify's query cost bucket, once Shopify has reported the bucket's limits"`
 }
 
 // ThrottleStatus is the state of the Store's query cost bucket, as get_shop
@@ -142,6 +143,15 @@ type ThrottleStatus struct {
 	CurrentlyAvailable float64 `json:"currently_available"`
 	MaximumAvailable   float64 `json:"maximum_available"`
 	RestoreRate        float64 `json:"restore_rate" jsonschema:"points restored per second"`
+}
+
+// Quota is the state of the calling Caller's own Quota, as get_shop reports
+// it, in Shopify's query cost points. Like ThrottleStatus, it is separate
+// from shopify.QuotaStatus so the Tool's output is fixed here.
+type Quota struct {
+	Available   float64 `json:"available"`
+	Maximum     float64 `json:"maximum"`
+	RestoreRate float64 `json:"restore_rate" jsonschema:"points restored per second"`
 }
 
 func getShop(client *shopify.Client) mcp.ToolHandlerFor[struct{}, Shop] {
@@ -173,6 +183,10 @@ func getShop(client *shopify.Client) mcp.ToolHandlerFor[struct{}, Shop] {
 				MaximumAvailable:   t.MaximumAvailable,
 				RestoreRate:        t.RestoreRate,
 			}
+		}
+		// After the query, so the Quota shows what this call cost it.
+		if q, ok := client.Quota(ctx); ok {
+			out.Quota = &Quota{Available: q.Available, Maximum: q.Maximum, RestoreRate: q.RestoreRate}
 		}
 		return nil, out, nil
 	}

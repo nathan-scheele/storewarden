@@ -94,6 +94,7 @@ Flags (from `storewarden -h`):
 | `--state-dir` | `storewarden` in your user config directory | Where tsnet keeps the node's state. On macOS that is `~/Library/Application Support/storewarden`; on Linux, `~/.config/storewarden`. |
 | `--tags` | `tag:storewarden` | Comma-separated tags the node advertises. |
 | `--allow-writes` | `false` | Write mode: serve the Write tools to Callers granted them. |
+| `--quota-share` | `0.5` | Each Caller's Quota, as a share of the Store's rate limit: above 0 and at most 1. storewarden refuses to start with any other value. See [Rate limits](#rate-limits). |
 | `--audit-log` | `-` | A file to append Audit records to, or `-` for stdout. |
 | `--debug` | `false` | Log at debug level, including tsnet's backend logs. |
 
@@ -236,6 +237,7 @@ Output:
 | `plan` | Its Shopify plan. |
 | `currency` | Its currency code. |
 | `throttle_status` | Shopify's query cost bucket: `currently_available`, `maximum_available` and `restore_rate` (points per second). Omitted if Shopify didn't report it. |
+| `quota` | The calling Caller's own Quota of that bucket, after this call: `available`, `maximum` and `restore_rate` (points per second). Omitted until Shopify has reported the bucket's limits. See [Rate limits](#rate-limits). |
 
 ### search_products
 
@@ -420,6 +422,10 @@ Shopify limits each store with a bucket of query cost points. storewarden keeps 
 
 Before each query, storewarden waits until the bucket should hold the most that query can cost. Each Tool's maximum cost is fixed and checked against a recording; `search_products` always counts its cost at the largest page size. Every Tool call has a 30-second deadline. If the wait would pass it, the call fails at once with a Tool error that starts with `retryable: ` and ends with how long to wait: `Retry the same call in <wait>`. If the Caller disconnects, the wait ends. If Shopify still throttles a query, storewarden waits and retries it once. A second throttle becomes the same retryable error.
 
+Every Caller also has its own Quota: a share of the Store's bucket, set with `--quota-share` (default `0.5`, half). A Quota's maximum and refill rate are that share of the limits Shopify reports, so they follow the Store's plan. Until Shopify has reported them, Quotas refuse nothing. A Quota is kept per tailnet node, by its stable ID, so each device and each tagged node has its own. Quotas are kept in memory only and start full when storewarden starts.
+
+Every query sent to Shopify for a Caller is charged to its Quota at that query's maximum cost: Read tools, Dry runs and real writes alike, and a throttled query's retry too. The Quota is checked first, and it never waits. A Caller whose Quota can't cover a query gets a Tool error at once, in the same form, naming its Quota: `retryable: your Quota of the Store's rate limit is used up, so nothing was done. Retry the same call in <wait>`. Other Callers carry on. `get_shop` shows a Caller its own Quota next to the Store's bucket, so it can pace itself.
+
 ## Threat model
 
 ### Assets
@@ -444,12 +450,13 @@ The root of trust is the tailnet policy file. Anyone who can edit it can grant t
 | Another device reuses a Caller's MCP session | Stateless MCP. Every request is identified on its own ([ADR 0001](docs/adr/0001-stateless-mcp-for-per-request-identity.md)). |
 | Public exposure | The only listener is tsnet's, inside the tailnet. No Funnel, serve config or host listener in the code, and `make never-public` fails the build if one appears. tsnet clears any saved serve config when the node starts. storewarden is built without tsnet's peer API server, which would otherwise listen on every host interface, and refuses to start if it isn't ([ADR 0003](docs/adr/0003-build-without-the-peer-api-server.md)). |
 | Credential leak | Secrets come only from the environment and are never logged or written to Audit records. The access token is kept only in memory. The app has no customer or order scopes. |
+| A busy, looping or manipulated Caller uses up the Store's rate limit | Every Caller has its own Quota, a share of the Store's rate limit (`--quota-share`). A Caller that has spent it gets a retryable error at once, and the others keep working. See [Rate limits](#rate-limits). |
 | An action that isn't audited | Audit records fail closed: a call whose attempt record can't be written is refused. |
 | Customer data in the audit trail | Shopify response bodies, and the messages in Shopify's errors, are never written to Audit records. Errors are recorded by their codes. |
 
 ### Accepted risks
 
-- **A granted Caller can drain the cost bucket.** All Callers share the Store's rate limit. One busy Caller can slow the others. There are no per-Caller quotas in v1.
+- **Quotas are per node: a Caller that can add tailnet nodes gets one Quota per node.** Each node is a separate Caller with its own Quota. Enough nodes together can still use up the Store's rate limit. The Audit records name every node.
 - **Someone with access to the host can change the audit log.** storewarden writes Audit records to a local file or stdout. It doesn't make them tamper-proof. Ship them off the host if you need that. Every real write and move is also in Shopify's inventory history, with a `storewarden://audit/<request_id>` reference to its Audit records, and no one on the host can change that.
 - **A granted Writer can still set a wrong quantity, or move the wrong units.** The guards stop duplicate and stale writes and moves, and a move of more units than the Caller read, not a wrong number or wrong Inventory state from a Caller that read the current ones. The Audit records and Shopify's inventory history show who made each change.
 
@@ -468,7 +475,7 @@ Audit records are JSON Lines, one record per line. They go to stdout by default,
 ### Which records are written
 
 - **A denied request:** one `denied` record. That is a request refused with HTTP 403 (WhoIs failed, the Caller has no storewarden capability, or its Grant has an unknown field), or a call to a Tool the Caller isn't granted.
-- **An allowed call:** an `attempt` record before Shopify is called, and a `result` record after.
+- **An allowed call:** an `attempt` record before Shopify is called, and a `result` record after. A call refused because the Caller's Quota is spent is an allowed call that failed: its `result` record's `error` names the Quota.
 
 ### Fail closed
 

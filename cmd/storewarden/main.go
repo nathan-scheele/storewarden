@@ -40,6 +40,7 @@ func run() error {
 		stateDir    = flag.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
 		tags        = flag.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
 		allowWrites = flag.Bool("allow-writes", false, "Write mode: serve the Write tool to Callers granted it")
+		quotaShare  = flag.Float64("quota-share", 0.5, "each Caller's Quota, as a `share` of the Store's rate limit: above 0, at most 1")
 		auditPath   = flag.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
 		debug       = flag.Bool("debug", false, "log at debug level, including tsnet's backend logs")
 	)
@@ -66,6 +67,10 @@ func run() error {
 	clientID, clientSecret := os.Getenv("SHOPIFY_CLIENT_ID"), os.Getenv("SHOPIFY_CLIENT_SECRET")
 	if clientID == "" || clientSecret == "" {
 		return errors.New("SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET must be set")
+	}
+	client, err := shopify.New("https://"+*store, clientID, clientSecret, *quotaShare, &http.Client{Timeout: 30 * time.Second}, logger)
+	if err != nil {
+		return fmt.Errorf("--quota-share: %w", err)
 	}
 
 	// Opened before the tailnet node starts, so the deferred Close runs
@@ -124,7 +129,6 @@ func run() error {
 		return err
 	}
 
-	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second}, logger)
 	srv := &http.Server{
 		Handler:           newHandler(lc, client, *allowWrites, auditLog, logger),
 		ReadHeaderTimeout: 10 * time.Second,
