@@ -225,13 +225,13 @@ func plainWriteError(err error) error {
 		case "CHANGE_FROM_QUANTITY_STALE":
 			return errors.New("the available quantity is no longer expected_quantity: it changed since you read it. " +
 				"Nothing was changed. Run a dry run to see the current quantity, then make the change with that as expected_quantity and a new idempotency_key. " +
-				"If you were retrying a change, the dry run also shows whether the earlier call already made it.")
+				"If you were retrying a change, the dry run also shows whether the earlier call already made it")
 		case "IDEMPOTENCY_KEY_PARAMETER_MISMATCH":
 			return errors.New("idempotency_key was already used with different input. " +
-				"Nothing was changed. Use a new idempotency_key for each new change, and reuse a key only to retry exactly the same call.")
+				"Nothing was changed. Use a new idempotency_key for each new change, and reuse a key only to retry exactly the same call")
 		case "IDEMPOTENCY_CONCURRENT_REQUEST":
 			return errors.New("retryable: a call with this idempotency_key is still in progress, so this call changed nothing itself. " +
-				"Retry exactly the same call, with the same idempotency_key, in a few seconds; Shopify makes the change only once.")
+				"Retry exactly the same call, with the same idempotency_key, in a few seconds; Shopify makes the change only once")
 		}
 	}
 	return err
