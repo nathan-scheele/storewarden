@@ -124,6 +124,7 @@ All Tools use fixed GraphQL documents against Admin API **2026-10**, pinned as a
 | `get_product` | Read | `product(id:)` + variants (first 100) | `read_products` |
 | `get_inventory` | Read | `inventoryItem(id:).inventoryLevels` with `quantities(names: ["available","on_hand","damaged","quality_control","safety_stock"])` | `read_inventory`, `read_locations` |
 | `set_inventory_quantity` | Write | `inventorySetQuantities @idempotent` | `write_inventory` |
+| `move_inventory_quantity` | Write | `inventoryMoveQuantities @idempotent` | `write_inventory` |
 
 **Inputs and outputs** (Go structs, schema inferred by the SDK):
 
@@ -137,8 +138,11 @@ All Tools use fixed GraphQL documents against Admin API **2026-10**, pinned as a
   - `expected_quantity`: required when `dry_run` is false.
 
   Output: `dry_run`, `current`, `new`, `applied`, `request_id`.
+- `move_inventory_quantity`. Input: `inventory_item_id`, `location_id`, `from` and `to` (each one of `available`, `damaged`, `quality_control`, `safety_stock`, exactly one of them `available`), `quantity` (≥ 1), `dry_run` (default **true**), and, required when `dry_run` is false, `idempotency_key`, `expected_from_quantity` and `expected_to_quantity`.
 
-Annotations: Read tools get `ReadOnlyHint` and `IdempotentHint`. `set_inventory_quantity` gets `DestructiveHint` and `IdempotentHint`.
+  Output: `dry_run`, `from` and `to` (each `{current, new}`), `applied`, `request_id`.
+
+Annotations: Read tools get `ReadOnlyHint` and `IdempotentHint`. Write tools get `DestructiveHint` and `IdempotentHint`.
 
 ### Write semantics
 
@@ -166,6 +170,28 @@ Write tools are guarded by two keys. They are only registered when the server st
    - A retry with the same key and input once returned the first call's result. Other retries, a few seconds and a minute after the first call, came back `CHANGE_FROM_QUANTITY_STALE` instead. So a Caller retrying a change that went through may get the stale-quantity error rather than the original result; the error tells it to dry-run, which shows whether the change was made.
    - Identical requests with the same key sent at once never got `IDEMPOTENCY_CONCURRENT_REQUEST`: one applied and the rest got `CHANGE_FROM_QUANTITY_STALE`. That error's test response is therefore built from Shopify's documented code and message, not recorded.
    - In every case the compare-and-swap check stopped a second change.
+
+`move_inventory_quantity` is guarded the same way, by Write mode and its own Grant; a Grant for `set_inventory_quantity` doesn't cover it. It meets [ADR 0002](adr/0002-write-tools-only-where-shopify-enforces-idempotency.md) as it stands (see its 2026-10-18 note) and needs no scope beyond `write_inventory`.
+
+1. **Checks before Shopify:** exactly one of `from` and `to` is `available`, and they differ. `reserved`, `committed`, `incoming` and `on_hand` are never accepted. A real move also needs the Idempotency key and both Expected quantities, and `quantity` may not exceed `expected_from_quantity`. Anything else is refused in plain words.
+2. **Dry run** (default): read `available`, `damaged`, `quality_control` and `safety_stock` at the location with one fixed query, and return both states' `current → new`. Nothing is written.
+3. **Execute** (`dry_run: false`): call `inventoryMoveQuantities` with one change:
+   - `changeFromQuantity` on `from` and on `to`, from `expected_from_quantity` and `expected_to_quantity`. Both are `Int!` in the document, so neither is ever null.
+   - `reason`: the non-available state's name (`damaged`, `quality_control` or `safety_stock`).
+   - `referenceDocumentUri: "storewarden://audit/<request-id>"`, which is also the `ledgerDocumentUri` on the non-available side. The document takes a nullable ledger URI for each side and the Tool sets exactly one: Shopify requires one except on `available`, and refuses one there.
+   - `@idempotent(key: idempotency_key)`
+
+   Errors in plain words, sharing `set_inventory_quantity`'s translation:
+   - `CHANGE_FROM_QUANTITY_STALE` (reported for either state or both) → "a quantity changed since you read it; dry-run again".
+   - `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` → "key reused with different input".
+   - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable, as for set.
+   - `IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED` → "an earlier call with this key failed; dry-run again and use a new key". Only the move Tool translates it; for set it is passed through like any other user error.
+   - Any other user error is passed through, and recorded by its codes.
+
+   Seen on the dev store (2026-10):
+   - An explicit null `ledgerDocumentUri` on the `available` side is accepted, in either direction.
+   - A move of more than the source state holds, with both `changeFromQuantity` values right, was applied and left the source negative (3 damaged, 4 moved, -1 left). Shopify doesn't stop it, so storewarden's own `quantity ≤ expected_from_quantity` check does.
+   - Resending a move that failed with a user error, with the same key and input, got the same user error, not `IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED`. That error's and the concurrent-request error's test responses are therefore built from Shopify's documented codes and messages.
 
 ## Shopify client (`internal/shopify`)
 
@@ -227,13 +253,13 @@ Write tools are guarded by two keys. They are only registered when the server st
 | Ungranted tailnet peer | WhoIs on every request; no capability → 403; Tools hidden and denied |
 | Granted but prompt-injected Caller | Fixed Tools only (no raw query), Read tools by default, Write mode off, dry run by default, compare-and-swap, small grant sets |
 | Retried or duplicated write | Shopify-enforced Idempotency key |
-| Stale read leading to a wrong write | Expected quantity → `changeFromQuantity` |
+| Stale read leading to a wrong write | Expected quantity → `changeFromQuantity`, on both sides of a move |
 | Session reused by another peer | Stateless MCP (ADR 0001) |
 | Public exposure | No Funnel, serve or host listener code path; CI guard; tsnet clears stale serve config at startup |
 | Credential leak | Secrets only from env; never logged; token kept only in memory |
 | Unaudited action | Audit fails closed |
 | Granted Caller draining the cost bucket | Accepted v1 risk; per-Caller quotas are future work |
-| Audit log tampering on the host | Out of scope; ship logs off-host |
+| Audit log tampering on the host | Out of scope; ship logs off-host. Every real write and move is also referenced in Shopify's inventory history |
 
 ## Testing and CI
 
