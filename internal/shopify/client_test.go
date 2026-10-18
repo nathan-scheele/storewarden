@@ -525,6 +525,33 @@ func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
 	}
 }
 
+// A throttled query and its retry are both reported to the observer, so the
+// Audit record counts what both cost.
+func TestTheObserverSeesTheThrottledResponseAndTheRetry(t *testing.T) {
+	f := newFakeShopify(t, answers(throttledBody(25), costBody(0)))
+	c := newTestClient(f, newFakeClock())
+	var seen []Response
+	ctx := WithObserver(t.Context(), func(resp *Response) { seen = append(seen, *resp) })
+
+	var data shopData
+	if _, err := c.Query(ctx, "query { shop { name } }", testQueryCost, nil, &data); err != nil {
+		t.Fatal(err)
+	}
+
+	var ids []string
+	var requested float64
+	for _, resp := range seen {
+		ids = append(ids, resp.RequestID)
+		requested += resp.Cost.RequestedQueryCost
+	}
+	if want := []string{"request-1", "request-2"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("observed request IDs = %v, want %v", ids, want)
+	}
+	if requested != 200 {
+		t.Errorf("observed requested cost = %v, want 200 (100 for each request)", requested)
+	}
+}
+
 func TestAThrottledRetryIsNotRetriedAgain(t *testing.T) {
 	f := newFakeShopify(t, answer(throttledBody(25)))
 	c := newTestClient(f, newFakeClock())

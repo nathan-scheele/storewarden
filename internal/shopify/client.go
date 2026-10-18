@@ -90,42 +90,45 @@ type Response struct {
 
 type observerKey struct{}
 
-// WithObserver returns a copy of ctx in which every Query that gets a
-// response from Shopify passes it to observe, the way net/http/httptrace
-// reports on requests. It lets the Audit record collect each call's costs
-// and request IDs without every Tool passing them along.
+// WithObserver returns a copy of ctx in which Query passes observe every
+// response it gets from Shopify, the way net/http/httptrace reports on
+// requests. A throttled query and its retry are two responses. It lets the
+// Audit record collect each call's costs and request IDs without every Tool
+// passing them along.
 func WithObserver(ctx context.Context, observe func(*Response)) context.Context {
 	return context.WithValue(ctx, observerKey{}, observe)
+}
+
+// report passes resp to ctx's observer, if it has one and resp isn't nil.
+func report(ctx context.Context, resp *Response) {
+	if observe, ok := ctx.Value(observerKey{}).(func(*Response)); ok && resp != nil {
+		observe(resp)
+	}
 }
 
 // Query runs a GraphQL query and decodes its data into data. maxCost is the
 // most the query can cost, in Shopify's query cost points.
 //
 // It first waits for the Store's cost bucket to hold maxCost, or returns a
-// *ThrottledError at once if that wait would outlast ctx's deadline. If Shopify throttles the query anyway, it is retried once the
-// same way. Shopify's errors come back as GraphQLErrors or UserErrors. The
-// Response, when not nil, is from the last request Shopify answered, even
-// if there is an error.
+// *ThrottledError at once if that wait would outlast ctx's deadline. If
+// Shopify throttles the query anyway, it is retried once the same way.
+// Shopify's errors come back as GraphQLErrors or UserErrors. The Response,
+// when not nil, is from the last request Shopify answered, even if there is
+// an error.
 func (c *Client) Query(ctx context.Context, query string, maxCost float64, variables map[string]any, data any) (*Response, error) {
-	resp, err := c.query(ctx, query, maxCost, variables, data)
-	if observe, ok := ctx.Value(observerKey{}).(func(*Response)); ok && resp != nil {
-		observe(resp)
-	}
-	return resp, err
-}
-
-func (c *Client) query(ctx context.Context, query string, maxCost float64, variables map[string]any, data any) (*Response, error) {
 	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.queryOnce(ctx, maxCost, body, data)
+	report(ctx, resp)
 	if !throttled(err) {
 		return resp, err
 	}
 	// The bucket now holds Shopify's figures from the throttled response,
 	// so the retry waits just long enough.
 	retryResp, err := c.queryOnce(ctx, maxCost, body, data)
+	report(ctx, retryResp)
 	if retryResp != nil {
 		resp = retryResp
 	}

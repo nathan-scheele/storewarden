@@ -420,9 +420,9 @@ Audit records are JSON Lines, one record per line. They go to stdout by default,
 | `idempotency_key` | For the Write tool, the Idempotency key, if any. |
 | `outcome` | On a `result` record, `ok` or `error`. |
 | `error` | The error the Caller got, if any. |
-| `shopify.requested_cost` | Shopify's estimated query cost, summed over the call's queries. |
-| `shopify.actual_cost` | Shopify's actual query cost, summed the same way. |
-| `shopify.request_id` | Shopify's `X-Request-Id` for the call's last query. |
+| `shopify.requested_cost` | Shopify's estimated query cost, summed over every request the call sent, including a throttled request and its retry. |
+| `shopify.actual_cost` | Shopify's actual query cost, summed the same way. A throttled request costs nothing. |
+| `shopify.request_id` | Shopify's `X-Request-Id` for the call's last request. |
 | `duration_ms` | On a `result` record, how long the call took. |
 
 The `shopify` object appears only once Shopify has answered. Shopify response bodies and credentials are never recorded. Arguments are recorded as sent, so Callers shouldn't put secrets in them.

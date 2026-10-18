@@ -183,7 +183,7 @@ Write tools are guarded by two keys. They are only registered when the server st
   - `tool`, `args`, `decision`, `reason`
   - `dry_run`, `idempotency_key`
   - `outcome`, `error`
-  - shopify: `requested_cost`, `actual_cost`, `request_id`
+  - shopify: `requested_cost`, `actual_cost`, `request_id`. Costs are summed over every response Shopify sent for the call, so a throttled request and its retry both count; `request_id` is the last response's.
   - `duration_ms`
 - **Never logged:** Shopify response bodies (they can contain customer data) and credentials.
 
