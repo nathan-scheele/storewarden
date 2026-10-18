@@ -510,7 +510,7 @@ It gives you each policy file to paste.
 
 It ends with a table of results, which it can post to the smoke-test issue. It leaves the storewarden node, its state, the policy and the keys in place for the next run, and says how to remove them.
 
-It doesn't capture a live throttled response from Shopify.
+It doesn't trigger Shopify's throttling. A live throttled response is recorded separately, in `cmd/storewarden/testdata/throttled.json`, and the client's tests use it.
 
 ## Development
 

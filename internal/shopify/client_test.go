@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -20,8 +21,9 @@ const (
 	testClientID     = "test-client-id"
 	testClientSecret = "test-client-secret"
 
-	// testQueryCost is the most the tests' queries can cost. costBody and
-	// throttledBody report it as the requested cost.
+	// testQueryCost is the most the tests' queries can cost, except the one
+	// that serves throttledFixture. costBody and throttledBody report it as
+	// the requested cost.
 	testQueryCost = 100
 )
 
@@ -411,13 +413,15 @@ func costBody(available float64) string {
 	}`, available)
 }
 
+// throttledFixture is the path of a real THROTTLED response from the dev
+// store, recorded by scripts/record-fixture.sh.
+const throttledFixture = "../../cmd/storewarden/testdata/throttled.json"
+
 // throttledBody is a THROTTLED response for a query whose requested cost is
-// 100, with the bucket holding available points.
-//
-// Assumed shape: no throttled response has been recorded from the dev store
-// yet (spec #1, Further Notes). This follows Shopify's rate limit docs: HTTP
-// 200, an error with extensions.code "THROTTLED", and the usual cost report
-// with a null actual cost. Replace it with a recording once one exists.
+// 100, with the bucket holding available points. Its shape is
+// throttledFixture's: HTTP 200, an error with extensions.code "THROTTLED",
+// and the usual cost report with a null actual cost. Its figures are the
+// tests' own, so each test can choose what the bucket holds.
 func throttledBody(available float64) string {
 	return fmt.Sprintf(`{
 	  "errors": [{"message": "Throttled", "extensions": {"code": "THROTTLED",
@@ -547,12 +551,18 @@ func TestFailsFastWhenCapacityWontRefillBeforeTheDeadline(t *testing.T) {
 }
 
 func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
-	f := newFakeShopify(t, answers(throttledBody(25), costBody(0)))
+	throttled, err := os.ReadFile(throttledFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeShopify(t, answers(string(throttled), costBody(0)))
 	clock := newFakeClock()
 	c := newTestClient(f, clock)
 
+	// The recorded query requested 990 points while the bucket held 618,
+	// refilling at 1000 a second, so the retry waits 372ms.
 	var data shopData
-	resp, err := c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data)
+	resp, err := c.Query(t.Context(), "query { shop { name } }", 990, nil, &data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +570,7 @@ func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
 	if data.Shop.Name != "storewarden-dev" || resp.RequestID != "request-2" {
 		t.Errorf("got %q from %q, want the retry's result", data.Shop.Name, resp.RequestID)
 	}
-	if got, want := clock.Waits(), []time.Duration{1500 * time.Millisecond}; !reflect.DeepEqual(got, want) {
+	if got, want := clock.Waits(), []time.Duration{372 * time.Millisecond}; !reflect.DeepEqual(got, want) {
 		t.Errorf("waits = %v, want %v", got, want)
 	}
 	if got := len(f.Tokens()); got != 2 {

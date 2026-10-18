@@ -1,0 +1,22 @@
+{
+  "errors": [
+    {
+      "message": "Throttled",
+      "extensions": {
+        "code": "THROTTLED",
+        "documentation": "https://shopify.dev/api/usage/rate-limits"
+      }
+    }
+  ],
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 990,
+      "actualQueryCost": null,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 618,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}
