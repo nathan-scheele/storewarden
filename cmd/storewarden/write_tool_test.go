@@ -280,7 +280,8 @@ func TestShopifyRefusalsBecomePlainToolErrors(t *testing.T) {
 				f := h.store.recorded(t, "set_inventory_quantity_applied")
 				h.store.answer(f.query, concurrentRequestResponse(t, h))
 			},
-			want:      []string{"a call with this idempotency_key is still in progress", "same idempotency_key"},
+			// Worded like a rate-limited call: marked retryable, ending with a wait.
+			want:      []string{"a call with this idempotency_key is still in progress", "same idempotency_key", "Retry the same call in 2s"},
 			retryable: true,
 		},
 	}

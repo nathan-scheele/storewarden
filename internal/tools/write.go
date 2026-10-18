@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -218,10 +219,15 @@ func setAvailableQuantity(ctx context.Context, client *shopify.Client, in SetInv
 	return plainWriteError(err)
 }
 
+// concurrentRequestWait is how long a Caller is told to wait before
+// retrying a write that is still in progress. Shopify doesn't say; the
+// first call usually finishes in well under this.
+const concurrentRequestWait = 2 * time.Second
+
 // plainWriteError turns Shopify's refusals of a real write, which come back
 // as user errors with these codes, into errors that tell the Caller what to
-// do next. The one refusal worth retrying unchanged is marked by starting
-// with "retryable: ". Any other error is returned as it is.
+// do next. The one refusal worth retrying unchanged is a retryableError.
+// Any other error is returned as it is.
 func plainWriteError(err error) error {
 	var userErrs shopify.UserErrors
 	if !errors.As(err, &userErrs) {
@@ -237,8 +243,11 @@ func plainWriteError(err error) error {
 			return errors.New("idempotency_key was already used with different input. " +
 				"Nothing was changed. Use a new idempotency_key for each new change, and reuse a key only to retry exactly the same call")
 		case "IDEMPOTENCY_CONCURRENT_REQUEST":
-			return errors.New("retryable: a call with this idempotency_key is still in progress, so this call changed nothing itself. " +
-				"Retry exactly the same call, with the same idempotency_key, in a few seconds; Shopify makes the change only once")
+			return &retryableError{
+				reason: "a call with this idempotency_key is still in progress, so this call changed nothing itself. " +
+					"Keep the same idempotency_key: Shopify makes the change only once",
+				wait: concurrentRequestWait,
+			}
 		}
 	}
 	return err

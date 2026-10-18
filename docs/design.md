@@ -154,7 +154,9 @@ Write tools are guarded by two keys. They are only registered when the server st
    Shopify enforces both guarantees ([ADR 0002](adr/0002-write-tools-only-where-shopify-enforces-idempotency.md)). These errors are passed back to the Caller in plain words:
    - `CHANGE_FROM_QUANTITY_STALE` → "quantity changed since you read it; dry-run again".
    - `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` → "key reused with different input".
-   - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable: the Tool error starts with `retryable: `.
+   - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable: the Tool error starts with `retryable: ` and ends `Retry the same call in 2s`, the same form as a rate-limited call.
+
+   Retryable errors are marked in their text, not as structured content. A Tool error reaches the Caller as text with `isError: true`; `structuredContent` would have to match the Tool's output schema, which describes a successful result, and an LLM Caller reads the text either way.
 
    Seen on the dev store (2026-10):
    - The input type takes `changeFromQuantity`; it has no `compareQuantity`.
