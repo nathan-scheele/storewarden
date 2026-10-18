@@ -65,6 +65,11 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 		return sc
 	}
 	sc.Before = before.available
+	if before.available < 1 {
+		sc.Error = fmt.Sprintf("no unit to move: %s at %s has %s. Stock at least 1 available in the Shopify admin, then run the smoke test again",
+			item, location, before)
+		return sc
+	}
 	moved := states{before.available - 1, before.damaged + 1}
 	toDamaged := tools.MoveInventoryQuantityInput{
 		InventoryItemID: item, LocationID: location, From: "available", To: "damaged", Quantity: 1,

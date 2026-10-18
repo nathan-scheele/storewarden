@@ -157,8 +157,16 @@ func runTools(ctx context.Context, s session) scenario {
 	}
 
 	// Find an inventory item stocked at some location, product by product.
+	// The move round trip that follows needs a unit to move, so the first
+	// level with some available stock wins; failing that, the first stocked
+	// level will do for this round trip.
 	gotProduct := false
 	var level tools.InventoryLevel
+	pick := func(product tools.Product, v tools.Variant, l tools.InventoryLevel) {
+		level = l
+		sc.ProductID, sc.ProductTitle, sc.VariantID = product.ID, product.Title, v.ID
+		sc.ItemID, sc.LocationID, sc.Before = v.InventoryItemID, l.LocationID, l.Available
+	}
 search:
 	for _, summary := range append(page1.Products, page2.Products...) {
 		var product tools.Product
@@ -177,12 +185,14 @@ search:
 			if toolErr, err := s.call(ctx, "get_inventory", tools.GetInventoryInput{InventoryItemID: v.InventoryItemID}, &inv); sc.failed(read, toolErr, err) {
 				return sc
 			}
-			if len(inv.Levels) > 0 {
-				level = inv.Levels[0]
-				sc.record(read, true, fmt.Sprintf("%d available, %d on hand at %s", level.Available, level.OnHand, level.LocationName))
-				sc.ProductID, sc.ProductTitle, sc.VariantID = product.ID, product.Title, v.ID
-				sc.ItemID, sc.LocationID, sc.Before = v.InventoryItemID, level.LocationID, level.Available
-				break search
+			for _, l := range inv.Levels {
+				if sc.ItemID == "" {
+					pick(product, v, l)
+				}
+				if l.Available > 0 {
+					pick(product, v, l)
+					break search
+				}
 			}
 		}
 	}
@@ -190,6 +200,8 @@ search:
 		sc.Error = "no product on the first two pages is stocked at a location"
 		return sc
 	}
+	sc.record("get_inventory returns quantities by location", true,
+		fmt.Sprintf("%d available, %d on hand at %s", level.Available, level.OnHand, level.LocationName))
 
 	before := sc.Before
 	after := before + 1

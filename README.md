@@ -580,7 +580,7 @@ It gives you each policy file to paste.
 - the fully granted Caller sees all six Tools;
 - `search_products` returns a page and its `next_cursor` gets the next one;
 - `get_product` returns variants with inventory item IDs, and `get_inventory` returns quantities by location;
-- for the first stocked inventory item:
+- for the first inventory item with stock available (or else the first stocked one):
   - a call with no `dry_run` is a Dry run and changes nothing;
   - executing with an `idempotency_key` and `expected_quantity` makes the change, and `get_inventory` shows it;
   - retrying the same call with the same key doesn't change the quantity again;

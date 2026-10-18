@@ -830,8 +830,8 @@ pause
 
 # ── 15 ────────────────────────────────────────────────────────────────────
 stage "Every Tool, and the Write tool from Dry run to retry"
-say "The test Caller now calls each Read tool, then picks the first stocked"
-say "inventory item and, on the development store:"
+say "The test Caller now calls each Read tool, then picks the first inventory item"
+say "with stock available (or else the first stocked one) and, on the development store:"
 step "makes a Dry run of adding 1 to its available quantity;"
 step "makes the change for real, with an Idempotency key and Expected quantity;"
 step "retries that call with the same key, which must not add 1 again;"
