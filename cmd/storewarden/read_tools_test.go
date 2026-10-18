@@ -296,3 +296,29 @@ func TestSearchProductsLastPageHasNoCursor(t *testing.T) {
 		t.Errorf("search_products =\n%v\nwant\n%v", got, want)
 	}
 }
+
+// When the Store's cost bucket can't refill before the call's deadline, the
+// Caller gets a retryable error that says how long to wait, at once.
+func TestRateLimitedCallIsARetryableErrorWithASuggestedWait(t *testing.T) {
+	h := newHarness(t, grantedTo(`{"tools":["get_shop"]}`))
+	// get_shop costs at most 2 points. The first call leaves none, and the
+	// bucket refills at 0.01 a second, so the next call needs 200s: longer
+	// than any call may take.
+	h.store.replaceInResponses(`"currentlyAvailable": 19998`, `"currentlyAvailable": 0`)
+	h.store.replaceInResponses(`"restoreRate": 1000.0`, `"restoreRate": 0.01`)
+	cs := h.connect(t)
+	callGetShop(t, cs)
+
+	got := callToolError(t, cs, "get_shop", nil)
+
+	if !strings.HasPrefix(got, "retryable: ") {
+		t.Errorf("error = %q, want it marked retryable", got)
+	}
+	// 200s, less whatever the bucket refilled while the test ran.
+	if !strings.Contains(got, "Retry the same call in 3m") {
+		t.Errorf("error = %q, want a suggested wait of about 3m20s", got)
+	}
+	if n := h.store.queries.Load(); n != 1 {
+		t.Errorf("Shopify got %d queries, want 1: the rate-limited call never reaches it", n)
+	}
+}

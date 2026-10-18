@@ -4,6 +4,7 @@ package tools
 
 import (
 	"context"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -54,7 +55,7 @@ var all = []tool{
 func readTool[In, Out any](def *mcp.Tool, handler func(*shopify.Client) mcp.ToolHandlerFor[In, Out]) tool {
 	def.Annotations = readOnly
 	return tool{def: def, add: func(s *mcp.Server, client *shopify.Client) {
-		mcp.AddTool(s, def, handler(client))
+		mcp.AddTool(s, def, bounded(handler(client)))
 	}}
 }
 
@@ -63,8 +64,24 @@ func readTool[In, Out any](def *mcp.Tool, handler func(*shopify.Client) mcp.Tool
 func writeTool[In, Out any](def *mcp.Tool, handler func(*shopify.Client) mcp.ToolHandlerFor[In, Out]) tool {
 	def.Annotations = destructive
 	return tool{def: def, write: true, add: func(s *mcp.Server, client *shopify.Client) {
-		mcp.AddTool(s, def, handler(client))
+		mcp.AddTool(s, def, bounded(handler(client)))
 	}}
+}
+
+// callTimeout is how long one Tool call may take. It is the deadline the
+// Shopify client's throttle checks: if waiting for Shopify's rate limit
+// would pass it, the call fails at once with a retryable error instead.
+const callTimeout = 30 * time.Second
+
+// bounded wraps a Tool's handler so that each call has callTimeout as its
+// deadline, and returns the error the Caller should see (see toolError).
+func bounded[In, Out any](handler mcp.ToolHandlerFor[In, Out]) mcp.ToolHandlerFor[In, Out] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		ctx, cancel := context.WithTimeout(ctx, callTimeout)
+		defer cancel()
+		res, out, err := handler(ctx, req, in)
+		return res, out, toolError(err)
+	}
 }
 
 // Register adds the Tools to s: the Read tools always, and the Write tools
