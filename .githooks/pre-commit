@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
-# Runs the same checks as CI before every commit. Install with `make hooks`.
+# Runs CI's offline checks (make check) before every commit. `make ci` adds
+# staticcheck and govulncheck. Install with `make hooks`.
 exec make check

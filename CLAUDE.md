@@ -4,7 +4,7 @@ Design: `docs/design.md`. Language: `GLOSSARY.md`. Decisions: `docs/adr/`.
 
 ## Working here
 
-- **Check**: `make check` (gofmt, vet, `test -race`). Every build needs `-tags ts_omit_peerapiserver`; the Makefile carries it.
+- **Check**: `make check` (gofmt, vet, the never-public guard, `test -race`). `make ci` adds staticcheck and govulncheck, at the versions pinned in the Makefile; it is what `.github/workflows/ci.yml` runs. Every build needs `-tags ts_omit_peerapiserver`; the Makefile carries it.
 - **Dependencies**: SDK and tsnet behaviour the code relies on is in `docs/agents/dependency-notes.md`. Read it before touching `internal/authz`, the MCP handler, or tsnet setup.
 - **Fixtures**: record Shopify responses with `scripts/record-fixture.sh NAME`, from `cmd/storewarden/testdata/NAME.graphql`. Every fixture comes from the dev store this way.
 - **Shopify**: only the dev store in `.env`, through `internal/shopify` or `scripts/record-fixture.sh`.

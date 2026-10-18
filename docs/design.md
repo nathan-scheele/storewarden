@@ -200,7 +200,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 - `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`.
 - `TS_AUTHKEY` or `TS_CLIENT_SECRET`. tsnet reads these itself; storewarden adds no Tailscale auth code.
 
-**Listening:** only `tsnet.Server.Listen("tcp", ":80")`, serving `/mcp` and `/healthz`. `/healthz` is unauthenticated, returns 200 or 503 with no body detail, and is the only unauthenticated path. storewarden never calls `ListenFunnel` or `SetServeConfig` and never opens a host listener. CI fails if any of those identifiers appear in non-test code. It is built with `-tags ts_omit_peerapiserver`, because tsnet's peer API would otherwise listen on every host interface, and it refuses to start without that tag ([ADR 0003](adr/0003-build-without-the-peer-api-server.md)).
+**Listening:** only `tsnet.Server.Listen("tcp", ":80")`, serving `/mcp` and `/healthz`. `/healthz` is unauthenticated, returns 200 or 503 with no body detail, and is the only unauthenticated path. storewarden never calls `ListenFunnel` or `SetServeConfig` and never opens a host listener. `make never-public` (`scripts/never-public`), run by CI and the pre-commit hook, fails if non-test code calls either of those or a standard-library host listener, or uses tsnet without checking `buildfeatures.HasPeerAPIServer`. It is built with `-tags ts_omit_peerapiserver`, because tsnet's peer API would otherwise listen on every host interface, and it refuses to start without that tag ([ADR 0003](adr/0003-build-without-the-peer-api-server.md)).
 
 **Logging:** `log/slog` JSON handler on stderr. tsnet's backend logs go to slog at debug level. tsnet still uploads its logs to log.tailscale.com, as tsnet does by default. The README explains this and how to opt out (`TS_NO_LOGS_NO_SUPPORT=true`).
 
@@ -235,7 +235,7 @@ Two test seams:
 
   Driven by the SDK client (`StreamableClientTransport`) over `httptest`. Covers authorization, list filtering, Write mode, dry run vs execute, Audit records and fail closed.
 - **Shopify client.** An `httptest` server plus an injected clock. Covers token reissue, the throttle's wait-vs-fail-fast decision, the `THROTTLED` retry and typed errors.
-- GitHub Actions: `go vet`, `staticcheck`, `go test -race ./...`, `govulncheck`, plus the no-public-listener check.
+- GitHub Actions (`.github/workflows/ci.yml`): `go vet`, `staticcheck`, `go test -race ./...`, `govulncheck`, plus the never-public check. Each step is a make target; `make ci` runs them all locally.
 - Manual: `make smoke`, a documented run against a dev store.
 
 ## Weekend build order

@@ -1,0 +1,45 @@
+# Runs the quality gates on every push and pull request. Each step is a make
+# target, so `make ci` runs the same thing locally.
+#
+# CI never touches a real tailnet or Shopify: the tests fake WhoIs and serve
+# recorded Shopify responses from httptest, and this workflow has no secrets.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      # Actions are pinned to commit SHAs; the comment names the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The Go version comes from go.mod.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: make fmt
+
+      - name: go vet
+        run: make vet
+
+      - name: Never public
+        run: make never-public
+
+      - name: staticcheck
+        run: make lint
+
+      - name: go test -race
+        run: make test
+
+      - name: govulncheck
+        run: make vuln
