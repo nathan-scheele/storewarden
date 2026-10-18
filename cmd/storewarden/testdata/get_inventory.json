@@ -11,7 +11,7 @@
             "quantities": [
               {
                 "name": "available",
-                "quantity": 50
+                "quantity": 44
               },
               {
                 "name": "on_hand",
@@ -19,15 +19,15 @@
               },
               {
                 "name": "damaged",
-                "quantity": 0
+                "quantity": 3
               },
               {
                 "name": "quality_control",
-                "quantity": 0
+                "quantity": 2
               },
               {
                 "name": "safety_stock",
-                "quantity": 0
+                "quantity": 1
               }
             ]
           },
@@ -39,7 +39,7 @@
             "quantities": [
               {
                 "name": "available",
-                "quantity": 50
+                "quantity": 44
               },
               {
                 "name": "on_hand",
@@ -47,15 +47,15 @@
               },
               {
                 "name": "damaged",
-                "quantity": 0
+                "quantity": 1
               },
               {
                 "name": "quality_control",
-                "quantity": 0
+                "quantity": 3
               },
               {
                 "name": "safety_stock",
-                "quantity": 0
+                "quantity": 2
               }
             ]
           }
