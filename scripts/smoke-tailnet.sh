@@ -214,7 +214,7 @@ finish() {
 # for a move to damaged and back, runs one test Caller out of its Quota while
 # the other keeps working, and checks the Audit records.
 
-ISSUE=9          # the smoke-test issue the results are posted to
+ISSUE=17         # the smoke-test issue the results are posted to
 CAP="github.com/nathan-scheele/storewarden"
 ADMIN="https://login.tailscale.com/admin"
 RESULTS=()       # "PASS  check" or "FAIL  check"
