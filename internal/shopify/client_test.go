@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -536,6 +537,55 @@ func TestAThrottledResponseFailsFastWhenTheRetryWouldMissTheDeadline(t *testing.
 	if got := len(f.Tokens()); got != 1 {
 		t.Errorf("GraphQL requests = %d, want 1", got)
 	}
+}
+
+func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
+	failures := map[string]func(http.ResponseWriter, string, int){
+		"401 after reissue": refusing("token-1", "token-2"),
+		"HTTP 500": func(w http.ResponseWriter, token string, _ int) {
+			http.Error(w, "bad token "+token, http.StatusInternalServerError)
+		},
+		"bad JSON": func(w http.ResponseWriter, token string, _ int) {
+			fmt.Fprint(w, "not json "+token)
+		},
+		"bad data": func(w http.ResponseWriter, token string, _ int) {
+			fmt.Fprintf(w, `{"data": {"shop": {"name": 1}}, "token": %q}`, token)
+		},
+	}
+	for name, graphql := range failures {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeShopify(t, graphql)
+			c := newTestClient(f, newFakeClock())
+			_, err := query(t, c)
+			if err == nil {
+				t.Fatal("query succeeded, want an error")
+			}
+			for _, secret := range []string{testClientSecret, "token-1", "token-2"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("error %q contains %q", err, secret)
+				}
+			}
+		})
+	}
+
+	t.Run("token request refused", func(t *testing.T) {
+		f := newFakeShopify(t, answer(shopBody))
+		c := New(f.URL, testClientID, "wrong-secret", nil)
+		_, err := query(t, c)
+		if err == nil || strings.Contains(err.Error(), "wrong-secret") {
+			t.Errorf("error = %v, want one without the secret", err)
+		}
+	})
+
+	t.Run("Shopify unreachable", func(t *testing.T) {
+		f := newFakeShopify(t, answer(shopBody))
+		c := New(f.URL, testClientID, testClientSecret, nil)
+		f.Close()
+		_, err := query(t, c)
+		if err == nil || strings.Contains(err.Error(), testClientSecret) {
+			t.Errorf("error = %v, want one without the secret", err)
+		}
+	})
 }
 
 func TestConcurrentCallersRefusedTogetherShareOneReissue(t *testing.T) {
