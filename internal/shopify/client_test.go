@@ -814,6 +814,134 @@ func TestQuotaLimitsAreTheStoresLimitsTimesTheShare(t *testing.T) {
 	}
 }
 
+// Until Shopify reports the Store's limits, a Quota's limits are unknown
+// too, and it refuses nothing, however small its share.
+func TestQuotasRefuseNothingBeforeTheLimitsAreKnown(t *testing.T) {
+	f := newFakeShopify(t, answer(`{"data": {"shop": {"name": "storewarden-dev"}}}`)) // no cost report
+	c := newClient(t, f.URL, testClientSecret, 0.01, discard)
+	c.clock = newFakeClock()
+
+	for range 20 {
+		if err := queryAs(t, c, "nCALLER"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if q, ok := c.Quota(WithQuotaKey(t.Context(), "nCALLER")); ok {
+		t.Errorf("Quota = %+v, want none before the limits are known", q)
+	}
+}
+
+func TestQuotasRefillWithTime(t *testing.T) {
+	f := newFakeShopify(t, answer(costBody(1000)))
+	clock := newFakeClock()
+	c := newTestClient(t, f, clock)
+	mustQuery(t, c)
+	spendQuota(t, c, "nCALLER")
+
+	clock.Advance(2 * time.Second) // 50 of the 100 points the next query needs
+	var spent *QuotaError
+	if err := queryAs(t, c, "nCALLER"); !errors.As(err, &spent) || spent.Wait != 2*time.Second {
+		t.Errorf("error = %v, want a *QuotaError suggesting 2s", err)
+	}
+	clock.Advance(2 * time.Second)
+	if err := queryAs(t, c, "nCALLER"); err != nil {
+		t.Errorf("query after the Quota refilled: %v", err)
+	}
+}
+
+func TestOneCallersQuotaDoesNotAffectAnothers(t *testing.T) {
+	f := newFakeShopify(t, answer(costBody(1000)))
+	c := newTestClient(t, f, newFakeClock())
+	mustQuery(t, c)
+	spendQuota(t, c, "nCALLER-A")
+
+	// B's Quota is still full: B can spend all of it too.
+	spendQuota(t, c, "nCALLER-B")
+
+	var spent *QuotaError
+	if err := queryAs(t, c, "nCALLER-A"); !errors.As(err, &spent) {
+		t.Errorf("A's error = %v, want *QuotaError", err)
+	}
+}
+
+func TestAQueryWithoutAQuotaKeyHasNoQuota(t *testing.T) {
+	f := newFakeShopify(t, answer(costBody(1000)))
+	c := newTestClient(t, f, newFakeClock())
+
+	// Far more than a Quota of 500 points would allow.
+	for range 20 {
+		mustQuery(t, c)
+	}
+	if q, ok := c.Quota(t.Context()); ok {
+		t.Errorf("Quota = %+v, want none for a context without a key", q)
+	}
+}
+
+func TestTheQuotaIsCheckedBeforeTheStoresBucket(t *testing.T) {
+	// The last response leaves the Store's bucket with 25 points, so the
+	// next query would wait 1.5s for it. By then the Caller has spent its
+	// Quota.
+	bodies := []string{costBody(1000), costBody(1000), costBody(1000), costBody(1000), costBody(1000), costBody(25)}
+	f := newFakeShopify(t, answers(bodies...))
+	clock := newFakeClock()
+	c := newTestClient(t, f, clock)
+	mustQuery(t, c)
+	spendQuota(t, c, "nCALLER")
+
+	err := queryBy(t, c, time.Hour) // no Quota key: the Store's bucket alone would wait
+	if err != nil {
+		t.Fatal(err)
+	}
+	waited := clock.Waits()
+	err = queryAs(t, c, "nCALLER")
+
+	var spent *QuotaError
+	if !errors.As(err, &spent) {
+		t.Fatalf("error = %v (%T), want *QuotaError", err, err)
+	}
+	if got := clock.Waits(); len(got) != len(waited) {
+		t.Errorf("waits = %v, want no more than %v: a spent Quota never waits for the Store's bucket", got, waited)
+	}
+}
+
+// shopFixture is the path of a successful get_shop response from the dev
+// store, recorded by scripts/record-fixture.sh.
+const shopFixture = "../../cmd/storewarden/testdata/shop.json"
+
+func TestAThrottledRetryIsChargedToTheQuota(t *testing.T) {
+	// The recordings report the dev store's limits: 20000 points, refilling
+	// at 1000 a second. At the share 0.075, a Quota holds 1500 points and
+	// refills at 75 a second: enough for one query of 990 points, not two.
+	shop, err := os.ReadFile(shopFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	throttled, err := os.ReadFile(throttledFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeShopify(t, answers(string(shop), string(throttled), string(shop)))
+	clock := newFakeClock()
+	c := newClient(t, f.URL, testClientSecret, 0.075, discard)
+	c.clock = clock
+	mustQuery(t, c) // learns the Store's limits
+
+	var data shopData
+	_, err = c.Query(WithQuotaKey(t.Context(), "nCALLER"), "query { shop { name } }", 990, nil, &data)
+
+	// The first try left 510 points; the retry needs 990.
+	var spent *QuotaError
+	if !errors.As(err, &spent) {
+		t.Fatalf("error = %v (%T), want *QuotaError for the retry", err, err)
+	}
+	if spent.Wait != 6400*time.Millisecond {
+		t.Errorf("suggested wait = %v, want 6.4s (480 points at 75 a second)", spent.Wait)
+	}
+	if got := len(f.Tokens()); got != 2 {
+		t.Errorf("GraphQL requests = %d, want 2 (the retry never reached Shopify)", got)
+	}
+}
+
 // quotaOf returns the Quota named key, failing the test if the client has
 // none to report.
 func quotaOf(t *testing.T, c *Client, key string) QuotaStatus {
