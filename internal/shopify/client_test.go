@@ -157,13 +157,13 @@ type shopData struct {
 	} `json:"shop"`
 }
 
-func query(t *testing.T, c *Client) (*Response, error) {
+func query(t *testing.T, c *Client) (*Meta, error) {
 	t.Helper()
 	var data shopData
 	return c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data)
 }
 
-func mustQuery(t *testing.T, c *Client) *Response {
+func mustQuery(t *testing.T, c *Client) *Meta {
 	t.Helper()
 	resp, err := query(t, c)
 	if err != nil {
@@ -573,8 +573,8 @@ func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
 func TestTheObserverSeesTheThrottledResponseAndTheRetry(t *testing.T) {
 	f := newFakeShopify(t, answers(throttledBody(25), costBody(0)))
 	c := newTestClient(f, newFakeClock())
-	var seen []Response
-	ctx := WithObserver(t.Context(), func(resp *Response) { seen = append(seen, *resp) })
+	var seen []Meta
+	ctx := WithObserver(t.Context(), func(resp *Meta) { seen = append(seen, *resp) })
 
 	var data shopData
 	if _, err := c.Query(ctx, "query { shop { name } }", testQueryCost, nil, &data); err != nil {

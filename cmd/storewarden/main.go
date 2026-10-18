@@ -40,7 +40,7 @@ func run() error {
 		stateDir    = flag.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
 		tags        = flag.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
 		allowWrites = flag.Bool("allow-writes", false, "Write mode: serve the Write tool to Callers granted it")
-		auditLog    = flag.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
+		auditPath   = flag.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
 		debug       = flag.Bool("debug", false, "log at debug level, including tsnet's backend logs")
 	)
 	flag.Parse()
@@ -70,12 +70,12 @@ func run() error {
 
 	// Opened before the tailnet node starts, so the deferred Close runs
 	// last: after the HTTP server and the node have shut down.
-	records, err := audit.Open(*auditLog, logger)
+	auditLog, err := audit.Open(*auditPath, logger)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if err := records.Close(); err != nil {
+		if err := auditLog.Close(); err != nil {
 			logger.Error("closing audit log", "error", err)
 		}
 	}()
@@ -126,7 +126,7 @@ func run() error {
 
 	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second}, logger)
 	srv := &http.Server{
-		Handler:           newHandler(lc, client, *allowWrites, records, logger),
+		Handler:           newHandler(lc, client, *allowWrites, auditLog, logger),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}

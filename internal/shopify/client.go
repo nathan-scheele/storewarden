@@ -89,8 +89,8 @@ type Cost struct {
 	ThrottleStatus     ThrottleStatus `json:"throttleStatus"`
 }
 
-// Response is what Shopify reports about a query besides its data.
-type Response struct {
+// Meta is what Shopify reports about a query besides its data.
+type Meta struct {
 	Cost      *Cost  // nil if Shopify didn't report it
 	RequestID string // Shopify's X-Request-Id
 }
@@ -102,13 +102,13 @@ type observerKey struct{}
 // requests. A throttled query and its retry are two responses. It lets the
 // Audit record collect each call's costs and request IDs without every Tool
 // passing them along.
-func WithObserver(ctx context.Context, observe func(*Response)) context.Context {
+func WithObserver(ctx context.Context, observe func(*Meta)) context.Context {
 	return context.WithValue(ctx, observerKey{}, observe)
 }
 
 // report passes resp to ctx's observer, if it has one and resp isn't nil.
-func report(ctx context.Context, resp *Response) {
-	if observe, ok := ctx.Value(observerKey{}).(func(*Response)); ok && resp != nil {
+func report(ctx context.Context, resp *Meta) {
+	if observe, ok := ctx.Value(observerKey{}).(func(*Meta)); ok && resp != nil {
 		observe(resp)
 	}
 }
@@ -119,10 +119,10 @@ func report(ctx context.Context, resp *Response) {
 // It first waits for the Store's cost bucket to hold maxCost, or returns a
 // *ThrottledError at once if that wait would outlast ctx's deadline. If
 // Shopify throttles the query anyway, it is retried once the same way.
-// Shopify's errors come back as GraphQLErrors or UserErrors. The Response,
+// Shopify's errors come back as GraphQLErrors or UserErrors. The Meta,
 // when not nil, is from the last request Shopify answered, even if there is
 // an error.
-func (c *Client) Query(ctx context.Context, query string, maxCost float64, variables map[string]any, data any) (*Response, error) {
+func (c *Client) Query(ctx context.Context, query string, maxCost float64, variables map[string]any, data any) (*Meta, error) {
 	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err
@@ -152,7 +152,7 @@ func throttled(err error) bool {
 }
 
 // queryOnce waits for capacity, then sends one query and decodes the answer.
-func (c *Client) queryOnce(ctx context.Context, maxCost float64, body []byte, data any) (*Response, error) {
+func (c *Client) queryOnce(ctx context.Context, maxCost float64, body []byte, data any) (*Meta, error) {
 	if err := c.waitForCapacity(ctx, maxCost); err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (c *Client) queryOnce(ctx context.Context, maxCost float64, body []byte, da
 		return nil, err
 	}
 	defer resp.Body.Close()
-	meta := &Response{RequestID: resp.Header.Get("X-Request-Id")}
+	meta := &Meta{RequestID: resp.Header.Get("X-Request-Id")}
 	if resp.StatusCode != http.StatusOK {
 		return meta, fmt.Errorf("shopify: graphql: HTTP %d", resp.StatusCode)
 	}

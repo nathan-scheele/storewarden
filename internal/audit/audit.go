@@ -34,30 +34,34 @@ type Record struct {
 
 	Tool     string          `json:"tool"`
 	Args     json.RawMessage `json:"args"` // as the Caller sent them
-	Decision string          `json:"decision"`
+	Decision Decision        `json:"decision"`
 	Reason   string          `json:"reason"`
 
 	DryRun         bool   `json:"dry_run"`
 	IdempotencyKey string `json:"idempotency_key"`
 
-	Outcome string `json:"outcome"`
-	Error   string `json:"error"`
+	Outcome Outcome `json:"outcome"` // "" until the result record
+	Error   string  `json:"error"`
 
 	Shopify *Shopify `json:"shopify,omitempty"` // only once Shopify has been called
 
 	DurationMS float64 `json:"duration_ms"`
 }
 
-// Decisions.
+// Decision says whether the call was allowed.
+type Decision string
+
 const (
-	Allow = "allow"
-	Deny  = "deny"
+	Allow Decision = "allow"
+	Deny  Decision = "deny"
 )
 
-// Outcomes of a result record.
+// Outcome says how an allowed call ended, on its result record.
+type Outcome string
+
 const (
-	OK     = "ok"
-	Failed = "error"
+	OK    Outcome = "ok"
+	Error Outcome = "error" // the Caller got an error; Record.Error says which
 )
 
 // Caller is who made the call, as Tailscale identified them.

@@ -86,14 +86,14 @@ func writeArgs(args json.RawMessage) (dryRun bool, idempotencyKey string) {
 }
 
 // outcome describes how a call ended, for the result record.
-func outcome(res mcp.Result, err error) (string, string) {
+func outcome(res mcp.Result, err error) (audit.Outcome, string) {
 	if err != nil {
-		return audit.Failed, auditError(err)
+		return audit.Error, auditError(err)
 	}
 	if r, ok := res.(*mcp.CallToolResult); ok && r.IsError {
 		// On the server, the result keeps the Tool's own error.
 		if toolErr := r.GetError(); toolErr != nil {
-			return audit.Failed, auditError(toolErr)
+			return audit.Error, auditError(toolErr)
 		}
 		// Otherwise the error is only the result's text content (see the
 		// SDK's toolForErr).
@@ -103,7 +103,7 @@ func outcome(res mcp.Result, err error) (string, string) {
 				msgs = append(msgs, t.Text)
 			}
 		}
-		return audit.Failed, strings.Join(msgs, "; ")
+		return audit.Error, strings.Join(msgs, "; ")
 	}
 	return audit.OK, ""
 }
@@ -129,7 +129,7 @@ type shopifyUsage struct {
 	rec *audit.Shopify // nil until Shopify answers a query
 }
 
-func (u *shopifyUsage) add(resp *shopify.Response) {
+func (u *shopifyUsage) add(resp *shopify.Meta) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.rec == nil {
