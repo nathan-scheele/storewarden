@@ -196,7 +196,7 @@ How storewarden reads the Grants:
 - **Union.** When several Grants match a Caller, the Caller gets every Tool any of them names. A Grant can only add Tools, never take them away. For example, if you add a third Grant that gives `group:inventory` the Read tools, Alice's devices can use all five Tools.
 - **No capability, no access.** A device with network access but no storewarden capability gets HTTP 403 before any MCP exchange.
 - **Typos deny.** A Grant value with an unknown field, such as `"tool"` instead of `"tools"`, denies the Caller and logs an error. A typo can't silently grant nothing.
-- **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. The rest of the Grant still applies.
+- **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. `set_inventory_quantity` is a Tool storewarden has even while Write mode is off, so naming it never warns. The rest of the Grant still applies.
 - **Write mode wins.** `set_inventory_quantity` is allowed only when storewarden runs with `--allow-writes`. A Grant that names it is still valid while Write mode is off; it just allows nothing until Write mode is on, and it logs no warning.
 
 Tagged devices are full Callers. They are the usual way to run headless Callers, such as agents on servers. A tagged device has no user, so `group:inventory` matches only the untagged devices of its members.

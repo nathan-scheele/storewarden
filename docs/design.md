@@ -129,7 +129,7 @@ All Tools use fixed GraphQL documents against Admin API **2026-10**, pinned as a
 
 - `get_shop` → name, myshopify domain, plan, currency, and the current throttle status.
 - `search_products` (`query` string in Shopify search syntax; `first` 1–50, default 10; optional `after` cursor) → `products[{id, title, handle, status, total_inventory}]`, `next_cursor`.
-- `get_product` (`id` as a product GID) → id, title, handle, status, tags, `variants[{id, title, sku, inventory_item_id}]`.
+- `get_product` (`id` as a product GID) → id, title, handle, status, tags, `variants[{id, title, sku, inventory_item_id}]`. Each variant's `title` and `sku` are there so a Caller can tell variants apart before it reads their inventory.
 - `get_inventory` (`inventory_item_id`) → `levels[{location_id, location_name, available, on_hand}]`.
 - `set_inventory_quantity`. Input: `inventory_item_id`, `location_id`, `quantity` (≥ 0), and these three:
   - `dry_run`: default **true**.
@@ -180,7 +180,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 ## Audit (`internal/audit`)
 
 - JSON Lines written to `--audit-log` (path, or `-` for stdout; the default is `-`). This is separate from the operational logs, which go to stderr.
-- **Records:** one per denial. For an allowed call, an `attempt` record before Shopify is called and a `result` record after.
+- **Records:** one per denial. For an allowed call, an `attempt` record before Shopify is called and a `result` record after. A request refused with HTTP 403 is refused before any MCP exchange, so its denial record has an empty `tool` and no `args`; a denied `tools/call` records both.
 - **Fail closed:** if the `attempt` record can't be written, the call is refused. Any record that can't be written, whether a denial, an attempt or a result, is logged as an error and turns `/healthz` unhealthy until restart: the audit trail is broken either way.
 - **Fields:**
   - time, `request_id`, `phase` (`denied`, `attempt` or `result`)
@@ -211,7 +211,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 - `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`.
 - `TS_AUTHKEY` or `TS_CLIENT_SECRET`. tsnet reads these itself; storewarden adds no Tailscale auth code.
 
-**Listening:** only `tsnet.Server.Listen("tcp", ":80")`, serving `/mcp` and `/healthz`. `/healthz` is unauthenticated, returns 200 or 503 with no body detail, and is the only unauthenticated path. storewarden never calls `ListenFunnel` or `SetServeConfig` and never opens a host listener. `make never-public` (`scripts/never-public`), run by CI and the pre-commit hook, fails if non-test code calls either of those or a standard-library host listener, or uses tsnet without checking `buildfeatures.HasPeerAPIServer`. It is built with `-tags ts_omit_peerapiserver`, because tsnet's peer API would otherwise listen on every host interface, and it refuses to start without that tag ([ADR 0003](adr/0003-build-without-the-peer-api-server.md)).
+**Listening:** only `tsnet.Server.Listen("tcp", ":80")`, serving `/mcp` and `/healthz`. `/healthz` is unauthenticated, returns 200 or 503 with no body detail, and is the only unauthenticated path. storewarden never calls `ListenFunnel` or `SetServeConfig` and never opens a host listener. `make never-public` (`scripts/never-public`), run by CI and the pre-commit hook, fails if non-test code calls either of those or a standard-library host listener (including an `httptest` server, which listens on the host's loopback), or uses tsnet without checking `buildfeatures.HasPeerAPIServer`. It is built with `-tags ts_omit_peerapiserver`, because tsnet's peer API would otherwise listen on every host interface, and it refuses to start without that tag ([ADR 0003](adr/0003-build-without-the-peer-api-server.md)).
 
 **Logging:** `log/slog` JSON handler on stderr. tsnet's backend logs go to slog at debug level. tsnet still uploads its logs to log.tailscale.com, as tsnet does by default. The README explains this and how to opt out (`TS_NO_LOGS_NO_SUPPORT=true`).
 
