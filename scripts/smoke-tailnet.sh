@@ -208,10 +208,11 @@ finish() {
 # only to refuse to run in it.
 #
 # Part 1 (stages 9-13) checks the tailnet and the Grants with get_shop.
-# Part 2 (stages 14-19) grants one test Caller every Tool and another only
+# Part 2 (stages 14-20) grants one test Caller every Tool and another only
 # the Read tools, calls every Tool, takes one inventory item through a Dry
-# run, a real write, a retry and a stale write, puts it back, and checks
-# the Audit records.
+# run, a real write, a retry and a stale write, puts it back, runs one test
+# Caller out of its Quota while the other keeps working, and checks the
+# Audit records.
 
 ISSUE=9          # the smoke-test issue the results are posted to
 CAP="github.com/nathan-scheele/storewarden"
@@ -402,7 +403,8 @@ if s.get("error"):
 scenario_get() { json_get "$SCENARIO" "$1"; }
 
 # check_audit FILE EXECUTED SHOP TITLE checks the Audit records in FILE:
-# their fields, an attempt and a result for each Tool, the denials, the real
+# their fields, an attempt and a result for each Tool, the denials, the
+# Quota refusals, the real
 # write's Dry run and Idempotency key (its request ID is EXECUTED), and that
 # no record holds Shopify response content (the shop name and product title
 # that Shopify returned). It prints one "PASS|FAIL<tab>check<tab>detail" line
@@ -444,6 +446,13 @@ report(any(r.get("tool") == "" for r in denied)
        and any(r.get("tool") == "set_inventory_quantity" for r in denied),
        "the 403s and the read-only Caller'"'"'s Write tool call have denial records",
        f"{len(denied)} denial records")
+
+refused = [r for r in records if r.get("phase") == "result" and "Quota" in (r.get("error") or "")]
+attempts = {r.get("request_id") for r in records if r.get("phase") == "attempt"}
+report(refused and all(r.get("request_id") in attempts for r in refused)
+       and not any(r.get("tool") == "get_inventory" for r in denied),
+       "a Quota refusal has an attempt record, a result record naming the Quota, and no denial record",
+       f"{len(refused)} Quota refusals")
 
 write = [r for r in records if r.get("request_id") == executed]
 result = [r for r in write if r.get("phase") == "result"]
@@ -535,7 +544,7 @@ edit_policy() {
 
 run_wizard() {
 
-TOTAL_STAGES=21
+TOTAL_STAGES=22
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # A worktree has no .env of its own, so use the main checkout's.
@@ -548,7 +557,7 @@ case "$(uname)" in
   *)      STATE_DIR="${STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/storewarden}" ;;
 esac
 
-banner "storewarden smoke test (#$ISSUE): the tailnet, every Tool and the Write tool"
+banner "storewarden smoke test (#$ISSUE): the tailnet, every Tool, the Write tool and Quotas"
 
 # ── 1 ─────────────────────────────────────────────────────────────────────
 stage "Preflight"
@@ -648,8 +657,10 @@ make build BIN="$tmpdir"
 (
   export SHOPIFY_CLIENT_ID SHOPIFY_CLIENT_SECRET
   if [[ -n "$TS_AUTHKEY" ]]; then export TS_AUTHKEY; fi
+  # A Quota of 5%: on the dev store's Plus plan, 1000 points refilling at
+  # 50 a second. That covers Part 2, and a burst of calls spends it.
   exec "$tmpdir/storewarden" --store "$SHOPIFY_STORE" --state-dir "$STATE_DIR" \
-    --allow-writes --audit-log "$AUDIT"
+    --allow-writes --quota-share 0.05 --audit-log "$AUDIT"
 ) >"$LOG" 2>&1 &
 SW_PID=$!
 say "Waiting for it to join the tailnet…"
@@ -820,7 +831,8 @@ step "puts the quantity back."
 pause "Press Enter to run it (it takes a few seconds)"
 run_scenario tools 3 4
 record_scenario
-local shop_name product_title executed_id restored_id
+local shop_name product_title executed_id restored_id item_id
+item_id=$(scenario_get item_id)
 shop_name=$(scenario_get shop_name)
 product_title=$(scenario_get product_title)
 executed_id=$(scenario_get executed_request_id)
@@ -863,6 +875,24 @@ record_scenario
 pause
 
 # ── 18 ────────────────────────────────────────────────────────────────────
+stage "One Caller runs out of its Quota"
+say "storewarden runs with --quota-share 0.05, so each Caller's Quota is 5% of"
+say "the Store's rate limit. The test Caller now calls get_inventory, several"
+say "calls at once, until storewarden refuses it for its Quota. Straight after,"
+say "the read-only test Caller makes the same call, which must still work."
+if [[ -n "$item_id" ]]; then
+  pause "Press Enter to run it (it takes a few seconds)"
+  run_scenario "quota $item_id" 3 4
+  record_scenario
+  run_scenario "quota-other $item_id" 5 6
+  record_scenario
+else
+  warn "Part 2 found no inventory item to call get_inventory with."
+  record FAIL "one Caller runs out of its Quota while another keeps working (no inventory item)"
+fi
+pause
+
+# ── 19 ────────────────────────────────────────────────────────────────────
 stage "Clean shutdown"
 MARK=$(log_lines)
 say "Sending SIGINT to storewarden…"
@@ -877,7 +907,7 @@ else
 fi
 pause
 
-# ── 19 ────────────────────────────────────────────────────────────────────
+# ── 20 ────────────────────────────────────────────────────────────────────
 stage "Audit records"
 say "Reading $AUDIT, now that storewarden has flushed and closed it."
 local verdict check detail
@@ -891,7 +921,7 @@ while IFS=$'\t' read -r verdict check detail; do
 done < <(check_audit "$AUDIT" "$executed_id" "$shop_name" "$product_title")
 pause
 
-# ── 20 ────────────────────────────────────────────────────────────────────
+# ── 21 ────────────────────────────────────────────────────────────────────
 stage "Tidy up"
 say "Stopping the test Callers; each removes its own node from the tailnet."
 exec 3>&- 5>&-
@@ -906,7 +936,7 @@ say "To remove them: Machines → storewarden → Remove; delete the policy line
 say "revoke the keys under Settings → Keys and delete them from $ENV_FILE."
 pause
 
-# ── 21 ────────────────────────────────────────────────────────────────────
+# ── 22 ────────────────────────────────────────────────────────────────────
 stage "Results"
 local r passed=0 failed=0 table=""
 for r in "${RESULTS[@]}"; do
