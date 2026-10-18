@@ -80,6 +80,67 @@ func TestSearchProductsReturnsAPageAndItsCursor(t *testing.T) {
 	}
 }
 
+func TestGetProductReturnsVariantsAndInventoryItems(t *testing.T) {
+	cs := newHarness(t, grantedTo(readTools)).connect(t)
+
+	got := callTool(t, cs, "get_product", map[string]any{"id": "gid://shopify/Product/8803714007201"})
+	variant := func(id, title, item string) map[string]any {
+		// The recorded variants have no SKU, so sku is absent.
+		return map[string]any{"id": id, "title": title, "inventory_item_id": item}
+	}
+	want := map[string]any{
+		"id":     "gid://shopify/Product/8803714007201",
+		"title":  "The Complete Snowboard",
+		"handle": "the-complete-snowboard",
+		"status": "ACTIVE",
+		"tags":   []any{"Premium", "Snow", "Snowboard", "Sport", "Winter"},
+		"variants": []any{
+			variant("gid://shopify/ProductVariant/48123931492513", "Ice", "gid://shopify/InventoryItem/50260716388513"),
+			variant("gid://shopify/ProductVariant/48123931525281", "Dawn", "gid://shopify/InventoryItem/50260716421281"),
+			variant("gid://shopify/ProductVariant/48123931558049", "Powder", "gid://shopify/InventoryItem/50260716454049"),
+			variant("gid://shopify/ProductVariant/48123931590817", "Electric", "gid://shopify/InventoryItem/50260716486817"),
+			variant("gid://shopify/ProductVariant/48123931623585", "Sunset", "gid://shopify/InventoryItem/50260716519585"),
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("get_product =\n%v\nwant\n%v", got, want)
+	}
+}
+
+func TestGetProductThatDoesNotExistIsAToolError(t *testing.T) {
+	cs := newHarness(t, grantedTo(readTools)).connect(t)
+
+	got := callToolError(t, cs, "get_product", map[string]any{"id": "gid://shopify/Product/1"})
+	if want := "no product with ID gid://shopify/Product/1"; got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+}
+
+// badIDs are IDs every Tool that takes an ID of the given kind must reject.
+func badIDs(kind string) []string {
+	return []string{
+		"",
+		"123",
+		"gid://shopify/" + kind + "/",
+		"gid://shopify/" + kind + "/abc",
+		"gid://shopify/" + kind + "/123/456",
+		"gid://shopify/Location/123",
+	}
+}
+
+func TestGetProductRejectsMalformedIDs(t *testing.T) {
+	for _, id := range badIDs("Product") {
+		h := newHarness(t, grantedTo(readTools))
+		got := callToolError(t, h.connect(t), "get_product", map[string]any{"id": id})
+		if want := "id must look like gid://shopify/Product/123"; !strings.Contains(got, want) {
+			t.Errorf("id %q: error %q, want it to say %q", id, got, want)
+		}
+		if n := h.store.queries.Load(); n != 0 {
+			t.Errorf("id %q: Shopify got %d queries, want none", id, n)
+		}
+	}
+}
+
 func TestSearchProductsRejectsPageSizeOutsideRange(t *testing.T) {
 	for _, first := range []int{-1, 0, 51} {
 		h := newHarness(t, grantedTo(readTools))
