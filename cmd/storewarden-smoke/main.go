@@ -1,9 +1,10 @@
 // Command storewarden-smoke is the test Caller for storewarden's manual
 // smoke test (scripts/smoke-tailnet.sh). It joins the tailnet as its own
 // ephemeral, tagged node, prints the tailnet's name as one JSON line, then
-// reads commands from stdin, one per line. The only command is "check": call
-// storewarden once, as an MCP client, and print what happened as one JSON
-// line. It stops at the end of stdin and removes its node from the tailnet.
+// reads commands from stdin, one per line, and answers each with one JSON
+// line. "check" calls storewarden once, as an MCP client. "tools" and
+// "read-only" run Part 2 of the smoke test (tools.go). It stops at the end
+// of stdin and removes its node from the tailnet.
 package main
 
 import (
@@ -102,6 +103,10 @@ func run() error {
 		switch in.Text() {
 		case "check":
 			err = out.Encode(check(ctx, hc, base))
+		case "tools":
+			err = out.Encode(withSession(ctx, hc, base, runTools))
+		case "read-only":
+			err = out.Encode(withSession(ctx, hc, base, runReadOnly))
 		default:
 			err = out.Encode(map[string]string{"error": "unknown command " + in.Text()})
 		}
@@ -147,8 +152,7 @@ func check(ctx context.Context, hc *http.Client, base string) result {
 		return r
 	}
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "storewarden-smoke", Version: "dev"}, nil)
-	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: base + "/mcp", HTTPClient: hc}, nil)
+	cs, err := connect(ctx, hc, base)
 	if err != nil {
 		r.Error = "connect: " + err.Error()
 		return r
@@ -174,6 +178,24 @@ func check(ctx context.Context, hc *http.Client, base string) result {
 		r.GetShop, _ = res.StructuredContent.(map[string]any)
 	}
 	return r
+}
+
+// connect opens an MCP session with storewarden, over the tailnet.
+func connect(ctx context.Context, hc *http.Client, base string) (*mcp.ClientSession, error) {
+	client := mcp.NewClient(&mcp.Implementation{Name: "storewarden-smoke", Version: "dev"}, nil)
+	return client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: base + "/mcp", HTTPClient: hc}, nil)
+}
+
+// withSession runs a Part 2 scenario over a new MCP session.
+func withSession(ctx context.Context, hc *http.Client, base string, run func(context.Context, session) scenario) scenario {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	cs, err := connect(ctx, hc, base)
+	if err != nil {
+		return scenario{Steps: []step{}, Error: "connect: " + err.Error()}
+	}
+	defer cs.Close()
+	return run(ctx, session{cs})
 }
 
 type response struct {

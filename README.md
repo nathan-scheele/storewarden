@@ -473,16 +473,16 @@ The automated tests fake the tailnet and Shopify. Before a release, run storewar
 
 Use a tailnet set aside for testing, not one with devices or rules you care about. The smoke test replaces the whole policy file.
 
-### Part 1: the tailnet checks
-
 `scripts/smoke-tailnet.sh` (or `make smoke`) is a step-by-step wizard. It needs `go`, `python3`, `lsof` and `mkfifo`, and the values from `scripts/setup-shopify.sh` in `.env`.
 
-It builds storewarden and `cmd/storewarden-smoke` with `make build`. `storewarden-smoke` is a test Caller: a separate, ephemeral node tagged `tag:storewarden-smoke` that calls storewarden with the official MCP SDK client. The wizard asks you for:
+It builds storewarden and `cmd/storewarden-smoke` with `make build`, and starts storewarden in Write mode with its Audit records in a file. `storewarden-smoke` is a test Caller: a separate, ephemeral node that calls storewarden with the official MCP SDK client. The wizard runs two of them, tagged `tag:storewarden-smoke` and `tag:storewarden-smoke-ro`, and asks you for:
 
 - an auth key for storewarden, tagged `tag:storewarden`, not ephemeral (not needed if the node is already registered);
-- a reusable, ephemeral auth key for the test Caller, tagged `tag:storewarden-smoke`. It is saved in `.env` as `TS_SMOKE_AUTHKEY`.
+- a reusable, ephemeral auth key for each test Caller, with its tag. They are saved in `.env` as `TS_SMOKE_AUTHKEY` and `TS_SMOKE_RO_AUTHKEY`.
 
-It gives you each policy file to paste, and checks:
+It gives you each policy file to paste.
+
+**Part 1, the tailnet and the Grants**, checks that:
 
 - storewarden and the test Caller join the same tailnet;
 - `/healthz` says healthy;
@@ -490,41 +490,27 @@ It gives you each policy file to paste, and checks:
 - storewarden has no TCP listener on the host;
 - a Grant naming an unknown Tool logs a warning and still grants `get_shop`;
 - a Grant with an unknown field gets HTTP 403 and an error log;
-- a Grant with no storewarden capability gets HTTP 403, while `/healthz` still works;
-- SIGINT shuts storewarden down cleanly.
+- a Grant with no storewarden capability gets HTTP 403, while `/healthz` still works.
 
-It ends with a table of results. It leaves the storewarden node, its state and the policy in place for Part 2.
+**Part 2, every Tool and the Write tool**, grants one test Caller all five Tools and the other only the four Read tools. It checks that:
 
-### Part 2: the Tools and the Write tool
+- the fully granted Caller sees all five Tools;
+- `search_products` returns a page and its `next_cursor` gets the next one;
+- `get_product` returns variants with inventory item IDs, and `get_inventory` returns quantities by location;
+- for the first stocked inventory item:
+  - a call with no `dry_run` is a Dry run and changes nothing;
+  - executing with an `idempotency_key` and `expected_quantity` makes the change, and `get_inventory` shows it;
+  - retrying the same call with the same key doesn't change the quantity again;
+  - a new change with the old `expected_quantity` gets the stale-quantity error and changes nothing;
+  - the quantity is put back;
+- the change shows in Shopify's inventory history with its `storewarden://audit/<request_id>` reference. You check this one in the Shopify admin; the wizard prints the link;
+- the read-only Caller doesn't see `set_inventory_quantity`, and calling it gives `unknown tool "set_inventory_quantity"`;
+- SIGINT shuts storewarden down cleanly;
+- the Audit records are JSON with every field in [Audit records](#audit-records), include attempt and result records for every Tool and the denials, show the real write's Dry run, Idempotency key and Shopify request ID, and hold no Shopify response content.
 
-The wizard covers only `get_shop`. Check the rest by hand, against the development store only.
+It ends with a table of results, which it can post to the smoke-test issue. It leaves the storewarden node, its state, the policy and the keys in place for the next run, and says how to remove them.
 
-1. Build it, then start it in Write mode, with the audit log in a file. It reuses the node that Part 1 registered, so it needs no auth key:
-
-   ```sh
-   make build
-   set -a; . ./.env; set +a
-   ./bin/storewarden --store "$SHOPIFY_STORE" --allow-writes --audit-log audit.jsonl
-   ```
-
-2. In the policy file, grant one test device all five Tools, and another only the four Read tools. Each Grant needs `"ip": ["tcp:80"]` as well as the `app` part.
-3. From the fully granted device, connect an MCP client to `http://<storewarden's tailnet address>/mcp` and call:
-   - `get_shop`;
-   - `search_products`, then again with its `next_cursor`;
-   - `get_product` on one of the results;
-   - `get_inventory` on one of its `inventory_item_id`s.
-4. Call `set_inventory_quantity` as a Dry run. Check that `applied` is `false` and the store didn't change.
-5. Execute it with a new `idempotency_key` and the Dry run's `current` as `expected_quantity`. Check that:
-   - `get_inventory` shows the new quantity;
-   - the item's inventory history in the Shopify admin shows the change, with the reference `storewarden://audit/<request_id>`.
-6. Retry the same call with the same key. It must not change the quantity again. Expect either the original result or the stale-quantity error.
-7. Call again with a new key and the old `expected_quantity`. Expect the stale-quantity error, and no change.
-8. From the read-only device, check that `tools/list` has no `set_inventory_quantity`, and that calling it gives `unknown tool "set_inventory_quantity"`.
-9. From a device with network access but no storewarden capability, check that `/mcp` answers HTTP 403.
-10. Read `audit.jsonl`. Every call above should have its records, with the fields in [Audit records](#audit-records), and no Shopify response bodies.
-11. Stop storewarden with Ctrl-C. Put the quantity back with another Dry run and execute if you like.
-
-When you're done, remove the test nodes from the tailnet, revoke the auth keys, and delete `TS_SMOKE_AUTHKEY` from `.env`.
+It doesn't capture a live throttled response from Shopify.
 
 ## Development
 
