@@ -49,6 +49,25 @@ func (b *bucket) record(now time.Time, cost *Cost) {
 	b.at = now
 }
 
+// limits returns the bucket's maximum and restore rate, and whether a
+// response has reported them yet.
+func (b *bucket) limits() (maximum, rate float64, known bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.maximum, b.rate, b.known
+}
+
+// setLimits changes the bucket's maximum and restore rate from now on.
+func (b *bucket) setLimits(now time.Time, maximum, rate float64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Refill up to now at the old limits first.
+	b.available = b.currentLocked(now)
+	b.at = now
+	b.maximum = maximum
+	b.rate = rate
+}
+
 // take reserves cost points and returns how long to wait before sending the
 // query. If deadline isn't zero and the wait would end after it, take
 // reserves nothing and returns the wait with ok false.

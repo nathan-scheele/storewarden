@@ -734,3 +734,93 @@ func TestQuotaShareMustBeAboveZeroAndAtMostOne(t *testing.T) {
 		}
 	}
 }
+
+// queryAs runs a query on behalf of the Caller whose Quota key is key.
+func queryAs(t *testing.T, c *Client, key string) error {
+	t.Helper()
+	var data shopData
+	_, err := c.Query(WithQuotaKey(t.Context(), key), "query { shop { name } }", testQueryCost, nil, &data)
+	return err
+}
+
+// spendQuota runs queries as key until its Quota is spent. The client must
+// already know the Store's limits from costBody: a Quota of 500 points at
+// the test share, so five queries of 100 points.
+func spendQuota(t *testing.T, c *Client, key string) {
+	t.Helper()
+	for range 5 {
+		if err := queryAs(t, c, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestASpentQuotaFailsFastWithTheWait(t *testing.T) {
+	// The Store's bucket stays full: 1000 points, refilling at 50 a second.
+	// At the share 0.5, a Quota holds 500 points and refills at 25 a second.
+	f := newFakeShopify(t, answer(costBody(1000)))
+	clock := newFakeClock()
+	c := newTestClient(t, f, clock)
+	mustQuery(t, c) // learns the Store's limits
+	spendQuota(t, c, "nCALLER")
+
+	err := queryAs(t, c, "nCALLER")
+
+	var spent *QuotaError
+	if !errors.As(err, &spent) {
+		t.Fatalf("error = %v (%T), want *QuotaError", err, err)
+	}
+	if spent.Wait != 4*time.Second {
+		t.Errorf("suggested wait = %v, want 4s (100 points at 25 a second)", spent.Wait)
+	}
+	if got := clock.Waits(); len(got) != 0 {
+		t.Errorf("waits = %v, want none: a Quota never waits", got)
+	}
+	if got := len(f.Tokens()); got != 6 {
+		t.Errorf("GraphQL requests = %d, want 6 (the refused call never reached Shopify)", got)
+	}
+}
+
+// limitsBody is a successful response for a query whose requested cost is
+// 100, reporting a full bucket of maximum points that refills at rate a
+// second.
+func limitsBody(maximum, rate float64) string {
+	return fmt.Sprintf(`{
+	  "data": {"shop": {"name": "storewarden-dev"}},
+	  "extensions": {"cost": {"requestedQueryCost": 100, "actualQueryCost": 100,
+	    "throttleStatus": {"maximumAvailable": %g, "currentlyAvailable": %g, "restoreRate": %g}}}
+	}`, maximum, maximum, rate)
+}
+
+func TestQuotaLimitsAreTheStoresLimitsTimesTheShare(t *testing.T) {
+	f := newFakeShopify(t, answers(limitsBody(1000, 50), limitsBody(1000, 50), limitsBody(2000, 100)))
+	c := newClient(t, f.URL, testClientSecret, 0.25, discard)
+	c.clock = newFakeClock()
+
+	mustQuery(t, c) // the Store reports 1000 points, refilling at 50 a second
+	if got, want := quotaOf(t, c, "nCALLER"), (QuotaStatus{Available: 250, Maximum: 250, RestoreRate: 12.5}); got != want {
+		t.Errorf("a new Caller's Quota = %+v, want a full %+v", got, want)
+	}
+	if err := queryAs(t, c, "nCALLER"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := quotaOf(t, c, "nCALLER"), (QuotaStatus{Available: 150, Maximum: 250, RestoreRate: 12.5}); got != want {
+		t.Errorf("Quota after a query of 100 points = %+v, want %+v", got, want)
+	}
+
+	mustQuery(t, c) // the Store now reports 2000 points, refilling at 100 a second
+	if got, want := quotaOf(t, c, "nCALLER"), (QuotaStatus{Available: 150, Maximum: 500, RestoreRate: 25}); got != want {
+		t.Errorf("Quota after the Store's limits changed = %+v, want %+v", got, want)
+	}
+}
+
+// quotaOf returns the Quota named key, failing the test if the client has
+// none to report.
+func quotaOf(t *testing.T, c *Client, key string) QuotaStatus {
+	t.Helper()
+	q, ok := c.Quota(WithQuotaKey(t.Context(), key))
+	if !ok {
+		t.Fatal("the client reports no Quota")
+	}
+	return q
+}
