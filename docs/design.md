@@ -162,7 +162,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 - **Token source:** client credentials grant (`POST /admin/oauth/access_token`, `grant_type=client_credentials`). The token is cached in memory and reissued 5 minutes before `expires_in` (24h) runs out, and once on a 401. A mutex makes sure only one reissue runs at a time. Tokens are never logged.
 - **Throttle:** one bucket per Store.
   - After every response, record `extensions.cost.throttleStatus` (`currentlyAvailable`, `maximumAvailable`, `restoreRate`). Limits are never hardcoded; until the first response arrives, the bucket assumes it's full.
-  - Before a call, estimate the refill needed for the query's known maximum cost. If that wait ends before the request's deadline, wait. If not, fail fast with a retryable error that includes the suggested wait.
+  - Before a call, estimate the refill needed for the query's known maximum cost. That cost is the largest `requestedQueryCost` Shopify has reported for the same query document, so Tools don't declare costs; a query not yet costed is sent without waiting. If the wait ends before the request's deadline, wait. If not, fail fast with a retryable error (`shopify.ThrottledError`) that includes the suggested wait.
   - On `THROTTLED`, retry once after the calculated wait. Errors and `userErrors` come back as typed Go errors.
 - Shopify's `X-Request-Id` response header goes into the Audit record.
 
