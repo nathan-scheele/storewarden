@@ -24,7 +24,7 @@ storewarden is a single Go binary. It joins a tailnet with `tsnet` and serves a 
 
 | Module | Version | Why |
 |---|---|---|
-| Go | 1.27.1+ | Required by tailscale.com v1.104 |
+| Go | 1.27.2+ | tailscale.com v1.104 needs 1.27.1; 1.27.2 has the net/http security fixes govulncheck requires |
 | `tailscale.com` | v1.104.1 | `tsnet`, `client/local`, `tailcfg` |
 | `github.com/modelcontextprotocol/go-sdk` | v1.8.0 | Official MCP SDK, v1 compatibility promise |
 
