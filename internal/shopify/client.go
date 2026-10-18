@@ -106,7 +106,10 @@ func (c *Client) Query(ctx context.Context, query string, variables map[string]a
 	var out struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
-			Message string `json:"message"`
+			Message    string `json:"message"`
+			Extensions struct {
+				Code string `json:"code"`
+			} `json:"extensions"`
 		} `json:"errors"`
 		Extensions struct {
 			Cost *Cost `json:"cost"`
@@ -117,14 +120,17 @@ func (c *Client) Query(ctx context.Context, query string, variables map[string]a
 	}
 	meta.Cost = out.Extensions.Cost
 	if len(out.Errors) > 0 {
-		msgs := make([]string, len(out.Errors))
+		errs := make(GraphQLErrors, len(out.Errors))
 		for i, e := range out.Errors {
-			msgs[i] = e.Message
+			errs[i] = GraphQLError{Message: e.Message, Code: e.Extensions.Code}
 		}
-		return meta, fmt.Errorf("shopify: graphql: %s", strings.Join(msgs, "; "))
+		return meta, errs
 	}
 	if err := json.Unmarshal(out.Data, data); err != nil {
 		return meta, fmt.Errorf("shopify: graphql: decoding data: %w", err)
+	}
+	if userErrs := findUserErrors(out.Data); len(userErrs) > 0 {
+		return meta, userErrs
 	}
 	return meta, nil
 }

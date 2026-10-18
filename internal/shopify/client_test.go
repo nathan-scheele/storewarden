@@ -2,9 +2,11 @@ package shopify
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -263,6 +265,89 @@ func TestConcurrentCallersShareOneTokenRequest(t *testing.T) {
 
 	if got := f.Issued(); got != 1 {
 		t.Errorf("tokens issued = %d, want 1", got)
+	}
+}
+
+func TestGraphQLErrorsAreTyped(t *testing.T) {
+	f := newFakeShopify(t, answer(`{"errors": [
+	  {"message": "Field 'nope' doesn't exist on type 'Shop'", "extensions": {"code": "undefinedField"}},
+	  {"message": "Something else"}
+	]}`))
+	c := newTestClient(f, newFakeClock())
+
+	_, err := query(t, c)
+	var got GraphQLErrors
+	if !errors.As(err, &got) {
+		t.Fatalf("error = %v (%T), want GraphQLErrors", err, err)
+	}
+	want := GraphQLErrors{
+		{Message: "Field 'nope' doesn't exist on type 'Shop'", Code: "undefinedField"},
+		{Message: "Something else"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("errors = %+v, want %+v", got, want)
+	}
+}
+
+func TestUserErrorsAreTypedAndTheDataStillDecoded(t *testing.T) {
+	f := newFakeShopify(t, answer(`{"data": {"inventorySetQuantities": {
+	  "inventoryAdjustmentGroup": null,
+	  "userErrors": [{"field": ["input", "quantities", "0"], "message": "Quantity is stale", "code": "TEST_CODE"}]
+	}}}`))
+	c := newTestClient(f, newFakeClock())
+
+	var data struct {
+		InventorySetQuantities struct {
+			UserErrors []UserError `json:"userErrors"`
+		} `json:"inventorySetQuantities"`
+	}
+	_, err := c.Query(t.Context(), "mutation { inventorySetQuantities { userErrors { field message code } } }", nil, &data)
+	var got UserErrors
+	if !errors.As(err, &got) {
+		t.Fatalf("error = %v (%T), want UserErrors", err, err)
+	}
+	want := UserErrors{{Field: []string{"input", "quantities", "0"}, Message: "Quantity is stale", Code: "TEST_CODE"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("user errors = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(data.InventorySetQuantities.UserErrors, []UserError(want)) {
+		t.Errorf("decoded data = %+v, want the user errors too", data)
+	}
+}
+
+func TestEmptyUserErrorsAreNotAnError(t *testing.T) {
+	f := newFakeShopify(t, answer(`{"data": {
+	  "inventorySetQuantities": {"userErrors": []},
+	  "nodes": [{"id": "gid://shopify/Product/1"}],
+	  "shop": null
+	}}`))
+	c := newTestClient(f, newFakeClock())
+
+	var data map[string]any
+	if _, err := c.Query(t.Context(), "mutation { x }", nil, &data); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRequestIDIsReturned(t *testing.T) {
+	f := newFakeShopify(t, func(w http.ResponseWriter, _ string, call int) {
+		if call == 1 {
+			fmt.Fprint(w, shopBody)
+			return
+		}
+		fmt.Fprint(w, `{"errors": [{"message": "Internal error"}]}`)
+	})
+	c := newTestClient(f, newFakeClock())
+
+	if resp := mustQuery(t, c); resp.RequestID != "request-1" {
+		t.Errorf("request ID = %q, want request-1", resp.RequestID)
+	}
+	resp, err := query(t, c)
+	if err == nil {
+		t.Fatal("query succeeded, want an error")
+	}
+	if resp == nil || resp.RequestID != "request-2" {
+		t.Errorf("response with an error = %+v, want request ID request-2", resp)
 	}
 }
 
