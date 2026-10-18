@@ -1,0 +1,15 @@
+query SearchProducts($query: String!, $first: Int!, $after: String) {
+  products(query: $query, first: $first, after: $after) {
+    nodes {
+      id
+      title
+      handle
+      status
+      totalInventory
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

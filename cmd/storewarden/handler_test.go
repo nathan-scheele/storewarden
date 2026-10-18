@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -61,21 +63,58 @@ func grantedTo(values ...string) fakeWhoIs {
 	}
 }
 
-// shopifyFake serves the client credentials grant and answers every GraphQL
-// query with the response recorded in testdata, and counts the queries.
-type shopifyFake struct {
-	mu      sync.Mutex
-	body    []byte
-	queries int
+// fixture is a response recorded from the dev store by
+// scripts/record-fixture.sh, with the query and variables that produced it.
+type fixture struct {
+	name      string
+	query     string
+	variables map[string]any
+	response  []byte
 }
 
-func newShopifyFake(t *testing.T) (*shopifyFake, *httptest.Server) {
+// loadFixtures reads every recorded response in testdata.
+func loadFixtures(t *testing.T) []fixture {
 	t.Helper()
-	recorded, err := os.ReadFile("testdata/shop.json")
+	queries, err := filepath.Glob("testdata/*.graphql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := &shopifyFake{body: recorded}
+	var fixtures []fixture
+	for _, q := range queries {
+		name := strings.TrimSuffix(q, ".graphql")
+		query, err := os.ReadFile(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := os.ReadFile(name + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := fixture{name: name, query: strings.TrimSpace(string(query)), response: response}
+		// A query recorded without variables has no variables file.
+		if vars, err := os.ReadFile(name + ".variables.json"); err == nil {
+			if err := json.Unmarshal(vars, &f.variables); err != nil {
+				t.Fatalf("%s.variables.json: %v", name, err)
+			}
+		}
+		fixtures = append(fixtures, f)
+	}
+	return fixtures
+}
+
+// fakeShopify serves the client credentials grant and answers each GraphQL
+// query with the response recorded for the same query and variables.
+type fakeShopify struct {
+	*httptest.Server
+	queries atomic.Int64 // GraphQL requests received
+
+	mu       sync.Mutex
+	fixtures []fixture
+}
+
+func newFakeShopify(t *testing.T) *fakeShopify {
+	t.Helper()
+	store := &fakeShopify{fixtures: loadFixtures(t)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /admin/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
 		if r.PostFormValue("grant_type") != "client_credentials" ||
@@ -92,36 +131,50 @@ func newShopifyFake(t *testing.T) (*shopifyFake, *httptest.Server) {
 		})
 	})
 	mux.HandleFunc("POST /admin/api/2026-10/graphql.json", func(w http.ResponseWriter, r *http.Request) {
+		store.queries.Add(1)
 		if r.Header.Get("X-Shopify-Access-Token") != testToken {
 			http.Error(w, "bad token", http.StatusUnauthorized)
 			return
 		}
-		fake.mu.Lock()
-		fake.queries++
-		body := fake.body
-		fake.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Request-Id", testShopifyRequestID)
-		w.Write(body)
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		store.mu.Lock()
+		var response []byte
+		for _, f := range store.fixtures {
+			if strings.TrimSpace(req.Query) == f.query && reflect.DeepEqual(req.Variables, f.variables) {
+				response = f.response
+				break
+			}
+		}
+		store.mu.Unlock()
+		if response != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Request-Id", testShopifyRequestID)
+			w.Write(response)
+			return
+		}
+		t.Errorf("no recorded response for query %q with variables %v", req.Query, req.Variables)
+		http.Error(w, "no recorded response", http.StatusInternalServerError)
 	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return fake, srv
+	store.Server = httptest.NewServer(mux)
+	t.Cleanup(store.Close)
+	return store
 }
 
-// replaceInBody changes the recorded response before it is served, so a test
-// can plant a recognisable value in it.
-func (f *shopifyFake) replaceInBody(old, new string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.body = bytes.ReplaceAll(f.body, []byte(old), []byte(new))
-}
-
-// queryCount is how many GraphQL queries Shopify has received.
-func (f *shopifyFake) queryCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.queries
+// replaceInResponses changes the recorded responses before they are served,
+// so a test can plant a recognisable value in them.
+func (s *fakeShopify) replaceInResponses(old, new string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.fixtures {
+		s.fixtures[i].response = bytes.ReplaceAll(s.fixtures[i].response, []byte(old), []byte(new))
+	}
 }
 
 // syncBuffer is a bytes.Buffer that is safe to write from server goroutines.
@@ -143,10 +196,10 @@ func (b *syncBuffer) String() string {
 }
 
 type harness struct {
-	url     string
-	logs    *syncBuffer
-	audit   *auditSink
-	shopify *shopifyFake
+	url   string
+	logs  *syncBuffer
+	audit *auditSink
+	store *fakeShopify
 }
 
 // newHarness starts the assembled server handler with the given WhoIs, a
@@ -156,12 +209,12 @@ func newHarness(t *testing.T, whois authz.WhoIser) *harness {
 	t.Helper()
 	logs := &syncBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	fake, shopifySrv := newShopifyFake(t)
-	client := shopify.New(shopifySrv.URL, testClientID, testClientSecret, nil)
+	store := newFakeShopify(t)
+	client := shopify.New(store.URL, testClientID, testClientSecret, nil)
 	sink := &auditSink{}
 	srv := httptest.NewServer(newHandler(whois, client, audit.New(sink, logger), logger))
 	t.Cleanup(srv.Close)
-	return &harness{url: srv.URL, logs: logs, audit: sink, shopify: fake}
+	return &harness{url: srv.URL, logs: logs, audit: sink, store: store}
 }
 
 func (h *harness) connect(t *testing.T) *mcp.ClientSession {

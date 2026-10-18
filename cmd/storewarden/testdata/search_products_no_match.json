@@ -1,0 +1,22 @@
+{
+  "data": {
+    "products": {
+      "nodes": [],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      }
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 6,
+      "actualQueryCost": 6,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19994,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

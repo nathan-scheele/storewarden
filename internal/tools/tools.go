@@ -20,10 +20,28 @@ func Register(s *mcp.Server, client *shopify.Client) []string {
 		Description: "Get the Store's name, myshopify domain, plan and currency, and Shopify's current rate limit status.",
 		Annotations: readOnly,
 	}, getShop(client))
-	return []string{"get_shop"}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "search_products",
+		Description: "Search the Store's products with Shopify's search syntax, one page at a time. Returns each product's ID, title, handle, status and total inventory, and a cursor for the next page.",
+		Annotations: readOnly,
+	}, searchProducts(client))
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_product",
+		Description: "Get one product by ID: its title, handle, status, tags, and its first 100 variants with their inventory item IDs.",
+		Annotations: readOnly,
+	}, getProduct(client))
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_inventory",
+		Description: "Get an inventory item's available and on-hand quantities at each location that stocks it, up to 100 locations.",
+		Annotations: readOnly,
+	}, getInventory(client))
+	return []string{"get_shop", "search_products", "get_product", "get_inventory"}
 }
 
-// getShopQuery has a maximum query cost of 2.
+// getShopMaxCost is the most getShopQuery can cost, in Shopify's query cost
+// points. Every Tool's maximum is checked against a recording in cost_test.go.
+const getShopMaxCost = 2
+
 const getShopQuery = `query GetShop {
   shop {
     name

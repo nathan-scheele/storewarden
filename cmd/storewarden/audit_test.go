@@ -185,7 +185,7 @@ func TestUngrantedToolCallWritesDenialRecord(t *testing.T) {
 		"decision": "deny",
 		"reason":   "tool not granted",
 	})
-	if n := h.shopify.queryCount(); n != 0 {
+	if n := h.store.queries.Load(); n != 0 {
 		t.Errorf("Shopify got %d queries for a denied call", n)
 	}
 }
@@ -230,7 +230,7 @@ func TestCallIsRefusedWhenAttemptCantBeRecorded(t *testing.T) {
 	if err == nil && !res.IsError {
 		t.Fatalf("call succeeded without an attempt record: %+v", res.StructuredContent)
 	}
-	if n := h.shopify.queryCount(); n != 0 {
+	if n := h.store.queries.Load(); n != 0 {
 		t.Errorf("Shopify got %d queries for an unaudited call", n)
 	}
 	if !h.logged(slog.LevelError, "writing audit record failed") {
@@ -271,7 +271,7 @@ func (h *harness) health(t *testing.T) int {
 func TestRecordsHoldNoResponseBodiesOrCredentials(t *testing.T) {
 	const marker = "RESPONSE-BODY-MARKER"
 	h := newHarness(t, grantedTo(`{"tools":["get_shop"]}`))
-	h.shopify.replaceInBody(`"storewarden-dev"`, `"`+marker+`"`)
+	h.store.replaceInResponses(`"storewarden-dev"`, `"`+marker+`"`)
 
 	// The marker reaches the Caller, so it really was in the response.
 	if got := callGetShop(t, h.connect(t))["name"]; got != marker {

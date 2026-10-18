@@ -1,0 +1,44 @@
+{
+  "data": {
+    "products": {
+      "nodes": [
+        {
+          "id": "gid://shopify/Product/8803714007201",
+          "title": "The Complete Snowboard",
+          "handle": "the-complete-snowboard",
+          "status": "ACTIVE",
+          "totalInventory": 50
+        },
+        {
+          "id": "gid://shopify/Product/8803714138273",
+          "title": "The Multi-location Snowboard",
+          "handle": "the-multi-location-snowboard",
+          "status": "ACTIVE",
+          "totalInventory": 100
+        },
+        {
+          "id": "gid://shopify/Product/8803714203809",
+          "title": "The Multi-managed Snowboard",
+          "handle": "the-multi-managed-snowboard",
+          "status": "ACTIVE",
+          "totalInventory": 100
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": "eyJsYXN0X2lkIjo4ODAzNzE0MjAzODA5LCJsYXN0X3ZhbHVlIjo4ODAzNzE0MjAzODA5fQ=="
+      }
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 9,
+      "actualQueryCost": 3,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19997,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}
