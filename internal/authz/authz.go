@@ -162,6 +162,9 @@ func MCP() mcp.Middleware {
 					}
 				}
 				list.Tools = granted
+				// The list now depends on who asked, so only this
+				// Caller's own client may cache it.
+				list.CacheScope = "private"
 				return list, nil
 			}
 			return next(ctx, method, req)

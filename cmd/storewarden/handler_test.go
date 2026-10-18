@@ -329,3 +329,15 @@ func TestHealthIsUnauthenticated(t *testing.T) {
 		t.Errorf("GET /healthz = %d %q, want 200 \"healthy\\n\"", resp.StatusCode, body)
 	}
 }
+
+func TestToolListIsPrivateToTheCaller(t *testing.T) {
+	h := newHarness(t, grantedTo(`{"tools":["get_shop"]}`))
+	res, err := h.connect(t).ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The list depends on the Caller's Grants, so nothing else may cache it.
+	if res.CacheScope != "private" {
+		t.Errorf("tools/list cacheScope = %q, want private", res.CacheScope)
+	}
+}
