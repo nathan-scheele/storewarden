@@ -141,6 +141,53 @@ func TestGetProductRejectsMalformedIDs(t *testing.T) {
 	}
 }
 
+func TestGetInventoryReturnsEachLocation(t *testing.T) {
+	cs := newHarness(t, grantedTo(readTools)).connect(t)
+
+	got := callTool(t, cs, "get_inventory", map[string]any{"inventory_item_id": "gid://shopify/InventoryItem/50260715896993"})
+	want := map[string]any{
+		"levels": []any{
+			map[string]any{
+				"location_id":   "gid://shopify/Location/85565997217",
+				"location_name": "Shop location",
+				"available":     50.0,
+				"on_hand":       50.0,
+			},
+			map[string]any{
+				"location_id":   "gid://shopify/Location/85566029985",
+				"location_name": "My Custom Location",
+				"available":     50.0,
+				"on_hand":       50.0,
+			},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("get_inventory =\n%v\nwant\n%v", got, want)
+	}
+}
+
+func TestGetInventoryForItemThatDoesNotExistIsAToolError(t *testing.T) {
+	cs := newHarness(t, grantedTo(readTools)).connect(t)
+
+	got := callToolError(t, cs, "get_inventory", map[string]any{"inventory_item_id": "gid://shopify/InventoryItem/1"})
+	if want := "no inventory item with ID gid://shopify/InventoryItem/1"; got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+}
+
+func TestGetInventoryRejectsMalformedIDs(t *testing.T) {
+	for _, id := range badIDs("InventoryItem") {
+		h := newHarness(t, grantedTo(readTools))
+		got := callToolError(t, h.connect(t), "get_inventory", map[string]any{"inventory_item_id": id})
+		if want := "inventory_item_id must look like gid://shopify/InventoryItem/123"; !strings.Contains(got, want) {
+			t.Errorf("id %q: error %q, want it to say %q", id, got, want)
+		}
+		if n := h.store.queries.Load(); n != 0 {
+			t.Errorf("id %q: Shopify got %d queries, want none", id, n)
+		}
+	}
+}
+
 func TestSearchProductsRejectsPageSizeOutsideRange(t *testing.T) {
 	for _, first := range []int{-1, 0, 51} {
 		h := newHarness(t, grantedTo(readTools))

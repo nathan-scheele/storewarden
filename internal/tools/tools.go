@@ -30,7 +30,12 @@ func Register(s *mcp.Server, client *shopify.Client) []string {
 		Description: "Get one product by ID: its title, handle, status, tags, and its first 100 variants with their inventory item IDs.",
 		Annotations: readOnly,
 	}, getProduct(client))
-	return []string{"get_shop", "search_products", "get_product"}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_inventory",
+		Description: "Get an inventory item's available and on-hand quantities at each location that stocks it, up to 100 locations.",
+		Annotations: readOnly,
+	}, getInventory(client))
+	return []string{"get_shop", "search_products", "get_product", "get_inventory"}
 }
 
 // getShopQuery has a maximum query cost of 2.
