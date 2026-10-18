@@ -93,15 +93,8 @@ func HTTP(whois WhoIser, tools map[string]bool, log *audit.Log, logger *slog.Log
 		caller, err := identify(ctx, whois, r.RemoteAddr, tools, logger)
 		if err != nil {
 			logger.Info("request denied", "remote_addr", r.RemoteAddr, "reason", err.Error())
-			// The request is refused either way, so a failed write needs
-			// no handling here: audit.Log logs it and turns unhealthy.
-			log.Write(audit.Record{
-				RequestID: audit.RequestID(ctx),
-				Phase:     audit.Denied,
-				Caller:    caller.Audit(),
-				Decision:  audit.Deny,
-				Reason:    err.Error(),
-			})
+			// Refused before any MCP exchange, so there is no Tool.
+			writeDenial(ctx, log, caller, "", nil, err.Error())
 			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 			return
 		}
@@ -175,16 +168,7 @@ func MCP(log *audit.Log) mcp.Middleware {
 			case "tools/call":
 				params := req.GetParams().(*mcp.CallToolParamsRaw)
 				if !caller.Allowed(params.Name) {
-					// Refused either way, as in HTTP.
-					log.Write(audit.Record{
-						RequestID: audit.RequestID(ctx),
-						Phase:     audit.Denied,
-						Caller:    caller.Audit(),
-						Tool:      params.Name,
-						Args:      params.Arguments,
-						Decision:  audit.Deny,
-						Reason:    "tool not granted",
-					})
+					writeDenial(ctx, log, caller, params.Name, params.Arguments, "tool not granted")
 					return nil, unknownTool(params.Name)
 				}
 			case "tools/list":
@@ -211,6 +195,21 @@ func MCP(log *audit.Log) mcp.Middleware {
 			return next(ctx, method, req)
 		}
 	}
+}
+
+// writeDenial writes the Audit record of a refused request. The request is
+// refused either way, so a failed write needs no handling here: audit.Log
+// logs it and turns unhealthy.
+func writeDenial(ctx context.Context, log *audit.Log, caller *Caller, tool string, args json.RawMessage, reason string) {
+	log.Write(audit.Record{
+		RequestID: audit.RequestID(ctx),
+		Phase:     audit.Denied,
+		Caller:    caller.Audit(),
+		Tool:      tool,
+		Args:      args,
+		Decision:  audit.Deny,
+		Reason:    reason,
+	})
 }
 
 // unknownTool is the error the MCP SDK returns for a Tool that doesn't exist.

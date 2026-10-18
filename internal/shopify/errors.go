@@ -17,21 +17,13 @@ type GraphQLError struct {
 type GraphQLErrors []GraphQLError
 
 func (e GraphQLErrors) Error() string {
-	msgs := make([]string, len(e))
-	for i, ge := range e {
-		msgs[i] = ge.Message
-	}
-	return "shopify: graphql: " + strings.Join(msgs, "; ")
+	return "shopify: graphql: " + strings.Join(each(e, func(ge GraphQLError) string { return ge.Message }), "; ")
 }
 
 // Codes returns the errors' codes, comma-separated, without Shopify's
 // messages, which can quote the Store's data.
 func (e GraphQLErrors) Codes() string {
-	codes := make([]string, len(e))
-	for i, ge := range e {
-		codes[i] = ge.Code
-	}
-	return joinCodes(codes)
+	return joinCodes(each(e, func(ge GraphQLError) string { return ge.Code }))
 }
 
 // has reports whether any of the errors has the given code.
@@ -57,20 +49,22 @@ type UserError struct {
 type UserErrors []UserError
 
 func (e UserErrors) Error() string {
-	msgs := make([]string, len(e))
-	for i, ue := range e {
-		msgs[i] = ue.Message
-	}
-	return "shopify: user errors: " + strings.Join(msgs, "; ")
+	return "shopify: user errors: " + strings.Join(each(e, func(ue UserError) string { return ue.Message }), "; ")
 }
 
 // Codes returns the user errors' codes, like GraphQLErrors.Codes.
 func (e UserErrors) Codes() string {
-	codes := make([]string, len(e))
-	for i, ue := range e {
-		codes[i] = ue.Code
+	return joinCodes(each(e, func(ue UserError) string { return ue.Code }))
+}
+
+// each returns part of every error in errs, such as its message, in order.
+// It is generic so that GraphQLErrors and UserErrors can both use it.
+func each[E any](errs []E, part func(E) string) []string {
+	parts := make([]string, len(errs))
+	for i, e := range errs {
+		parts[i] = part(e)
 	}
-	return joinCodes(codes)
+	return parts
 }
 
 // joinCodes joins error codes with commas, showing a missing one as "none".

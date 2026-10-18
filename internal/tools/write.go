@@ -173,10 +173,7 @@ func availableQuantity(ctx context.Context, client *shopify.Client, item, locati
 	var data struct {
 		InventoryItem *struct {
 			InventoryLevel *struct {
-				Quantities []struct {
-					Name     string `json:"name"`
-					Quantity int    `json:"quantity"`
-				} `json:"quantities"`
+				Quantities []quantity `json:"quantities"`
 			} `json:"inventoryLevel"`
 		} `json:"inventoryItem"`
 	}
@@ -192,12 +189,11 @@ func availableQuantity(ctx context.Context, client *shopify.Client, item, locati
 	if data.InventoryItem.InventoryLevel == nil {
 		return 0, fmt.Errorf("inventory item %s isn't stocked at location %s", item, location)
 	}
-	for _, q := range data.InventoryItem.InventoryLevel.Quantities {
-		if q.Name == "available" {
-			return q.Quantity, nil
-		}
+	available, ok := quantityNamed(data.InventoryItem.InventoryLevel.Quantities, "available")
+	if !ok {
+		return 0, errors.New("shopify reported no available quantity")
 	}
-	return 0, errors.New("shopify reported no available quantity")
+	return available, nil
 }
 
 // setAvailableQuantity makes a real write of in, which checkRealWrite has
