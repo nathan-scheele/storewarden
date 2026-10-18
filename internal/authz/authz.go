@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -84,9 +83,11 @@ func (g *grantValue) UnmarshalJSON(b []byte) error {
 // identifies it with WhoIs, and puts both in the request context. A request
 // whose Caller can't be identified, or has no storewarden capability, gets
 // HTTP 403 and a denial Audit record.
-// tools lists the Tools this server has; a Grant naming any other Tool is
-// logged as a warning.
-func HTTP(whois WhoIser, tools []string, log *audit.Log, logger *slog.Logger, next http.Handler) http.Handler {
+// tools maps the name of every storewarden Tool to whether this server
+// serves it: a Write tool isn't served unless Write mode is on. A Caller is
+// only ever allowed Tools that are served. A Grant naming a Tool that isn't
+// in tools at all is logged as a warning.
+func HTTP(whois WhoIser, tools map[string]bool, log *audit.Log, logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := audit.WithRequestID(r.Context(), audit.NewRequestID())
 		caller, err := identify(ctx, whois, r.RemoteAddr, tools, logger)
@@ -110,7 +111,7 @@ func HTTP(whois WhoIser, tools []string, log *audit.Log, logger *slog.Logger, ne
 
 // identify returns the Caller behind remoteAddr. When it denies the Caller,
 // it still returns whatever identity it learned, for the Audit record.
-func identify(ctx context.Context, whois WhoIser, remoteAddr string, tools []string, logger *slog.Logger) (*Caller, error) {
+func identify(ctx context.Context, whois WhoIser, remoteAddr string, tools map[string]bool, logger *slog.Logger) (*Caller, error) {
 	who, err := whois.WhoIs(ctx, remoteAddr)
 	if err != nil {
 		return &Caller{}, fmt.Errorf("whois: %w", err)
@@ -144,11 +145,16 @@ func identify(ctx context.Context, whois WhoIser, remoteAddr string, tools []str
 	caller.allowed = map[string]bool{}
 	for _, v := range values {
 		for _, name := range v.Tools {
-			if !slices.Contains(tools, name) {
+			served, known := tools[name]
+			if !known {
 				callerLog.Warn("grant names an unknown tool", "tool", name)
 				continue
 			}
-			caller.allowed[name] = true
+			// A Grant for a Write tool is correct policy even while Write
+			// mode is off, so it isn't warned about, but nor is it allowed.
+			if served {
+				caller.allowed[name] = true
+			}
 		}
 	}
 	return caller, nil

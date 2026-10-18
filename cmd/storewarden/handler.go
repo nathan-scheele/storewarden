@@ -15,9 +15,9 @@ import (
 
 // newHandler assembles storewarden's HTTP handler: the MCP endpoint behind
 // WhoIs authorization and auditing, and the unauthenticated health endpoint.
-func newHandler(whois authz.WhoIser, client *shopify.Client, auditLog *audit.Log, logger *slog.Logger) http.Handler {
+func newHandler(whois authz.WhoIser, client *shopify.Client, writeMode bool, auditLog *audit.Log, logger *slog.Logger) http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{Name: "storewarden", Version: version}, &mcp.ServerOptions{Logger: logger})
-	toolNames := tools.Register(server, client)
+	toolNames := tools.Register(server, client, writeMode)
 	// authz.MCP runs first, so tools.Audited only sees granted calls.
 	server.AddReceivingMiddleware(authz.MCP(auditLog), tools.Audited(auditLog))
 
