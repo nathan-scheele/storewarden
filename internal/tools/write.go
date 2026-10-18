@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nathan-scheele/storewarden/internal/audit"
 	"github.com/nathan-scheele/storewarden/internal/shopify"
 )
 
@@ -46,6 +47,12 @@ func checkExpected(field string, expected *int) error {
 		return fmt.Errorf("%s is required when dry_run is false; run a dry run to see the current quantity", field)
 	}
 	return nil
+}
+
+// auditURI returns the URI that links a real write in Shopify's inventory
+// history back to this call's Audit records.
+func auditURI(ctx context.Context) string {
+	return "storewarden://audit/" + audit.RequestID(ctx)
 }
 
 // levelQuantities runs query, which reads an inventory item's named
@@ -97,6 +104,9 @@ func plainWriteError(err error, stale string) error {
 		case "IDEMPOTENCY_KEY_PARAMETER_MISMATCH":
 			return errors.New("idempotency_key was already used with different input. " +
 				"Nothing was changed. Use a new idempotency_key for each new change, and reuse a key only to retry exactly the same call")
+		case "IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED":
+			return errors.New("an earlier call with this idempotency_key failed, so Shopify won't use the key again. " +
+				"Nothing was changed. Run a dry run again, then make the change with a new idempotency_key")
 		case "IDEMPOTENCY_CONCURRENT_REQUEST":
 			return &retryableError{
 				reason: "a call with this idempotency_key is still in progress, so this call changed nothing itself. " +

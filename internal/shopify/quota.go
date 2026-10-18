@@ -39,10 +39,11 @@ type quotas struct {
 	byKey map[string]*bucket
 }
 
-// get returns key's Quota at now, with its limits set from the Store's
-// bucket, store. It returns nil until store knows Shopify's limits: until
-// then the Quotas can't know theirs.
-func (q *quotas) get(key string, now time.Time, store *bucket) *bucket {
+// bucketFor returns key's Quota at now, after setting its limits from the
+// Store's bucket, store. A key it hasn't seen gets a new, full Quota. It
+// returns nil until store knows Shopify's limits: until then the Quotas
+// can't know theirs.
+func (q *quotas) bucketFor(key string, now time.Time, store *bucket) *bucket {
 	maximum, rate, known := store.limits()
 	if !known {
 		return nil
@@ -64,16 +65,23 @@ func (q *quotas) get(key string, now time.Time, store *bucket) *bucket {
 	return b
 }
 
-// chargeQuota charges cost to the Quota named by ctx's key, if it has one,
-// or returns a *QuotaError at once if the Quota can't cover it. Until the
-// Store's limits are known, it refuses nothing and charges nothing.
-func (c *Client) chargeQuota(ctx context.Context, cost float64) error {
+// quotaFor returns the Quota named by ctx's key (WithQuotaKey) at now. It
+// returns nil if ctx has no key, or if Shopify hasn't yet reported the
+// Store's limits, from which the Quota's come.
+func (c *Client) quotaFor(ctx context.Context, now time.Time) *bucket {
 	key, ok := ctx.Value(quotaKey{}).(string)
 	if !ok {
 		return nil
 	}
+	return c.quotas.bucketFor(key, now, &c.bucket)
+}
+
+// chargeQuota charges cost to the Quota named by ctx's key, if it has one,
+// or returns a *QuotaError at once if the Quota can't cover it. Until the
+// Store's limits are known, it refuses nothing and charges nothing.
+func (c *Client) chargeQuota(ctx context.Context, cost float64) error {
 	now := c.clock.Now()
-	b := c.quotas.get(key, now, &c.bucket)
+	b := c.quotaFor(ctx, now)
 	if b == nil {
 		return nil
 	}
@@ -92,20 +100,21 @@ type QuotaStatus struct {
 	RestoreRate float64 // points restored per second
 }
 
+// status returns the state of the Quota b at now.
+func (b *bucket) status(now time.Time) QuotaStatus {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return QuotaStatus{Available: b.currentLocked(now), Maximum: b.maximum, RestoreRate: b.rate}
+}
+
 // Quota returns the state of the Quota named by ctx's key (WithQuotaKey).
 // ok is false if ctx has no key, or if Shopify hasn't yet reported the
 // Store's limits, from which the Quota's come.
 func (c *Client) Quota(ctx context.Context) (q QuotaStatus, ok bool) {
-	key, ok := ctx.Value(quotaKey{}).(string)
-	if !ok {
-		return QuotaStatus{}, false
-	}
 	now := c.clock.Now()
-	b := c.quotas.get(key, now, &c.bucket)
+	b := c.quotaFor(ctx, now)
 	if b == nil {
 		return QuotaStatus{}, false
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return QuotaStatus{Available: b.currentLocked(now), Maximum: b.maximum, RestoreRate: b.rate}, true
+	return b.status(now), true
 }

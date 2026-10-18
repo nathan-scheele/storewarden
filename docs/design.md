@@ -161,13 +161,14 @@ Write tools are guarded by two keys. They are only registered when the server st
    - `CHANGE_FROM_QUANTITY_STALE` → "quantity changed since you read it; dry-run again".
    - `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` → "key reused with different input".
    - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable: the Tool error starts with `retryable: ` and ends `Retry the same call in 2s`, the same form as a rate-limited call.
+   - `IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED` → "an earlier call with this key failed; dry-run again and use a new key".
 
    Retryable errors are marked in their text, not as structured content. A Tool error reaches the Caller as text with `isError: true`; `structuredContent` would have to match the Tool's output schema, which describes a successful result, and an LLM Caller reads the text either way.
 
    Seen on the dev store (2026-10):
    - The input type takes `changeFromQuantity`; it has no `compareQuantity`.
    - A retry with the same key and input once returned the first call's result. Other retries, a few seconds and a minute after the first call, came back `CHANGE_FROM_QUANTITY_STALE` instead. So a Caller retrying a change that went through may get the stale-quantity error rather than the original result; the error tells it to dry-run, which shows whether the change was made.
-   - Identical requests with the same key sent at once never got `IDEMPOTENCY_CONCURRENT_REQUEST`: one applied and the rest got `CHANGE_FROM_QUANTITY_STALE`. That error's test response is therefore built from Shopify's documented code and message, not recorded.
+   - Identical requests with the same key sent at once never got `IDEMPOTENCY_CONCURRENT_REQUEST`: one applied and the rest got `CHANGE_FROM_QUANTITY_STALE`. That error's test response is therefore built from Shopify's documented code and message, not recorded, as is the previous-attempt-failed one (see the move Tool below).
    - In every case the compare-and-swap check stopped a second change.
 
 `move_inventory_quantity` is guarded the same way, by Write mode and its own Grant; a Grant for `set_inventory_quantity` doesn't cover it. It meets [ADR 0002](adr/0002-write-tools-only-where-shopify-enforces-idempotency.md) as it stands (see its 2026-10-18 note) and needs no scope beyond `write_inventory`.
@@ -184,7 +185,7 @@ Write tools are guarded by two keys. They are only registered when the server st
    - `CHANGE_FROM_QUANTITY_STALE` (reported for either state or both) → "a quantity changed since you read it; dry-run again".
    - `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` → "key reused with different input".
    - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable, as for set.
-   - `IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED` → "an earlier call with this key failed; dry-run again and use a new key". Only the move Tool translates it; for set it is passed through like any other user error.
+   - `IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED` → "an earlier call with this key failed; dry-run again and use a new key", as for set.
    - Any other user error is passed through, and recorded by its codes.
 
    Seen on the dev store (2026-10):

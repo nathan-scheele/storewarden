@@ -199,7 +199,7 @@ How storewarden reads the Grants:
 - **Typos deny.** A Grant value with an unknown field, such as `"tool"` instead of `"tools"`, denies the Caller and logs an error. A typo can't silently grant nothing.
 - **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. The Write tools, `set_inventory_quantity` and `move_inventory_quantity`, are Tools storewarden has even while Write mode is off, so naming them never warns. The rest of the Grant still applies.
 - **Write mode wins.** The Write tools are allowed only when storewarden runs with `--allow-writes`. A Grant that names one is still valid while Write mode is off; it just allows nothing until Write mode is on, and it logs no warning.
-- **Each Write tool by name.** A Grant for `set_inventory_quantity` doesn't cover `move_inventory_quantity`, or the other way round. You can let an agent record damaged stock without letting it set counts.
+- **Each Write tool by name.** A Grant for `set_inventory_quantity` doesn't cover `move_inventory_quantity`, or the other way round. You can let a Caller record damaged stock without letting it set counts.
 
 Tagged devices are full Callers. They are the usual way to run headless Callers, such as agents on servers. A tagged device has no user, so `group:inventory` matches only the untagged devices of its members.
 
@@ -330,6 +330,7 @@ Shopify's refusals come back as plain Tool errors:
 - **Stale quantity** (`CHANGE_FROM_QUANTITY_STALE`): the available quantity is no longer `expected_quantity`. Nothing changed. Run a new Dry run and use its `current` as `expected_quantity`, with a new key.
 - **Key reused with different input** (`IDEMPOTENCY_KEY_PARAMETER_MISMATCH`): nothing changed. Use a new key for each new change.
 - **Concurrent request** (`IDEMPOTENCY_CONCURRENT_REQUEST`): a call with this key is still in progress. The error starts with `retryable: ` and ends `Retry the same call in 2s`, like a rate-limited call. Retry exactly the same call, with the same key, after that wait.
+- **Previous attempt failed** (`IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED`): an earlier call with this key failed, and Shopify won't use the key again. Nothing changed. Run a new Dry run and use a new key.
 
 #### What retries really do
 
@@ -588,9 +589,10 @@ It gives you each policy file to paste.
 - for the same item, moving 1 unit from available to damaged:
   - a move with no `dry_run` is a Dry run of both states and changes nothing;
   - executing with an `idempotency_key` and both Expected quantities makes the move;
-  - retrying the same call with the same key doesn't move again;
+  - retrying the same call with the same key doesn't move again, and the results say whether it got the original result or the stale-quantity error;
   - a new move with the old Expected quantities gets the stale-quantity error and changes nothing;
-  - a move of more than damaged holds is refused by storewarden, and, claiming damaged holds enough, what Shopify answers is recorded in the results;
+  - a move of more than damaged holds is refused by storewarden and changes nothing;
+  - the same move with an `expected_from_quantity` claiming damaged holds enough is refused by Shopify as stale and changes nothing. What Shopify does with an honest move of more than a state holds is recorded under [move_inventory_quantity](#move_inventory_quantity), not tested here;
   - the unit is moved back;
 - the change and the move show in Shopify's inventory history with their `storewarden://audit/<request_id>` references, and the move with reason `damaged`. You check these in the Shopify admin; the wizard prints the link;
 - the read-only Caller doesn't see either Write tool, and calling them gives `unknown tool "set_inventory_quantity"` and `unknown tool "move_inventory_quantity"`;

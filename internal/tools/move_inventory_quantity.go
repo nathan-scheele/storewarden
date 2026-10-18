@@ -2,9 +2,9 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -118,16 +118,24 @@ type StateChange struct {
 // movableStates are the Inventory states a move can name. Reserved and
 // committed stock is held for orders, incoming stock isn't at the location
 // yet, and on hand is the sum of the others, so none of them is here.
+// getMovableQuantitiesQuery, the Tool's description, the from and to
+// schema tags and getInventoryQuery list them too, as fixed text; change
+// them together.
 var movableStates = []string{"available", "damaged", "quality_control", "safety_stock"}
+
+// movableStatesText is movableStates as an error names them:
+// "available, damaged, quality_control or safety_stock".
+var movableStatesText = strings.Join(movableStates[:len(movableStates)-1], ", ") + " or " + movableStates[len(movableStates)-1]
 
 // checkMove returns an error unless a move from one Inventory state to
 // another is allowed: both are movable states, they differ, and exactly one
 // of them is available.
 func checkMove(from, to string) error {
-	for _, s := range []struct{ field, state string }{{"from", from}, {"to", to}} {
-		if !slices.Contains(movableStates, s.state) {
-			return fmt.Errorf("%s must be available, damaged, quality_control or safety_stock, not %q", s.field, s.state)
-		}
+	if !slices.Contains(movableStates, from) {
+		return fmt.Errorf("from must be %s, not %q", movableStatesText, from)
+	}
+	if !slices.Contains(movableStates, to) {
+		return fmt.Errorf("to must be %s, not %q", movableStatesText, to)
 	}
 	if from == to {
 		return fmt.Errorf("from and to are both %s: a move needs two different states", from)
@@ -219,7 +227,7 @@ func moveInventoryQuantity(client *shopify.Client) mcp.ToolHandlerFor[MoveInvent
 // through the reference document URI, which is also the ledger document
 // URI on the non-available side.
 func moveQuantity(ctx context.Context, client *shopify.Client, in MoveInventoryQuantityInput) error {
-	uri := "storewarden://audit/" + audit.RequestID(ctx)
+	uri := auditURI(ctx)
 	variables := map[string]any{
 		"inventoryItemId":       in.InventoryItemID,
 		"locationId":            in.LocationID,
@@ -244,7 +252,7 @@ func moveQuantity(ctx context.Context, client *shopify.Client, in MoveInventoryQ
 	// As for set_inventory_quantity, no error means the move was made.
 	var data struct{}
 	_, err := client.Query(ctx, moveQuantityMutation, moveQuantityMaxCost, variables, &data)
-	return plainMoveError(err)
+	return plainWriteError(err, staleMoveQuantities)
 }
 
 // staleMoveQuantities is move_inventory_quantity's wording for Shopify's
@@ -252,22 +260,3 @@ func moveQuantity(ctx context.Context, client *shopify.Client, in MoveInventoryQ
 const staleMoveQuantities = "a quantity changed since you read it: expected_from_quantity or expected_to_quantity is no longer current. " +
 	"Nothing was changed. Run a dry run to see the current quantities, then move with those as expected_from_quantity and expected_to_quantity and a new idempotency_key. " +
 	"If you were retrying a move, the dry run also shows whether the earlier call already made it"
-
-// previousAttemptFailed is the wording for Shopify's
-// IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED, which only the move Tool translates.
-const previousAttemptFailed = "an earlier call with this idempotency_key failed, so Shopify won't use the key again. " +
-	"Nothing was changed. Run a dry run again, then make the move with a new idempotency_key"
-
-// plainMoveError is plainWriteError for a move, which also translates
-// IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED.
-func plainMoveError(err error) error {
-	var userErrs shopify.UserErrors
-	if errors.As(err, &userErrs) {
-		for _, ue := range userErrs {
-			if ue.Code == "IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED" {
-				return errors.New(previousAttemptFailed)
-			}
-		}
-	}
-	return plainWriteError(err, staleMoveQuantities)
-}
