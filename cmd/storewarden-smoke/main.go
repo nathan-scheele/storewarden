@@ -2,9 +2,10 @@
 // smoke test (scripts/smoke-tailnet.sh). It joins the tailnet as its own
 // ephemeral, tagged node, prints the tailnet's name as one JSON line, then
 // reads commands from stdin, one per line, and answers each with one JSON
-// line. "check" calls storewarden once, as an MCP client. "tools" and
-// "read-only" run Part 2 of the smoke test (tools.go). It stops at the end
-// of stdin and removes its node from the tailnet.
+// line. "check" calls storewarden once, as an MCP client. "tools",
+// "move ITEM LOCATION" and "read-only" run Part 2 of the smoke test
+// (tools.go and move.go). It stops at the end of stdin and removes its node
+// from the tailnet.
 package main
 
 import (
@@ -100,13 +101,20 @@ func run() error {
 	base := "http://" + *target
 	in := bufio.NewScanner(os.Stdin)
 	for in.Scan() {
-		switch in.Text() {
-		case "check":
+		// A command is one word, and "move" also takes the inventory item
+		// and the location to move it at.
+		fields := strings.Fields(in.Text())
+		switch {
+		case in.Text() == "check":
 			err = out.Encode(check(ctx, hc, base))
-		case "tools":
+		case in.Text() == "tools":
 			err = out.Encode(withSession(ctx, hc, base, runTools))
-		case "read-only":
+		case in.Text() == "read-only":
 			err = out.Encode(withSession(ctx, hc, base, runReadOnly))
+		case len(fields) == 3 && fields[0] == "move":
+			err = out.Encode(withSession(ctx, hc, base, func(ctx context.Context, s session) scenario {
+				return runMove(ctx, s, fields[1], fields[2])
+			}))
 		default:
 			err = out.Encode(map[string]string{"error": "unknown command " + in.Text()})
 		}

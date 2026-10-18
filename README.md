@@ -567,9 +567,9 @@ It gives you each policy file to paste.
 - a Grant with an unknown field gets HTTP 403 and an error log;
 - a Grant with no storewarden capability gets HTTP 403, while `/healthz` still works.
 
-**Part 2, every Tool and the Write tool**, grants one test Caller all five Tools and the other only the four Read tools. It checks that:
+**Part 2, every Tool and the Write tools**, grants one test Caller all six Tools and the other only the four Read tools. It checks that:
 
-- the fully granted Caller sees all five Tools;
+- the fully granted Caller sees all six Tools;
 - `search_products` returns a page and its `next_cursor` gets the next one;
 - `get_product` returns variants with inventory item IDs, and `get_inventory` returns quantities by location;
 - for the first stocked inventory item:
@@ -578,10 +578,17 @@ It gives you each policy file to paste.
   - retrying the same call with the same key doesn't change the quantity again;
   - a new change with the old `expected_quantity` gets the stale-quantity error and changes nothing;
   - the quantity is put back;
-- the change shows in Shopify's inventory history with its `storewarden://audit/<request_id>` reference. You check this one in the Shopify admin; the wizard prints the link;
-- the read-only Caller doesn't see `set_inventory_quantity`, and calling it gives `unknown tool "set_inventory_quantity"`;
+- for the same item, moving 1 unit from available to damaged:
+  - a move with no `dry_run` is a Dry run of both states and changes nothing;
+  - executing with an `idempotency_key` and both Expected quantities makes the move;
+  - retrying the same call with the same key doesn't move again;
+  - a new move with the old Expected quantities gets the stale-quantity error and changes nothing;
+  - a move of more than damaged holds is refused by storewarden, and, claiming damaged holds enough, what Shopify answers is recorded in the results;
+  - the unit is moved back;
+- the change and the move show in Shopify's inventory history with their `storewarden://audit/<request_id>` references, and the move with reason `damaged`. You check these in the Shopify admin; the wizard prints the link;
+- the read-only Caller doesn't see either Write tool, and calling them gives `unknown tool "set_inventory_quantity"` and `unknown tool "move_inventory_quantity"`;
 - SIGINT shuts storewarden down cleanly;
-- the Audit records are JSON with every field in [Audit records](#audit-records), include attempt and result records for every Tool and the denials, show the real write's Dry run, Idempotency key and Shopify request ID, and hold no Shopify response content.
+- the Audit records are JSON with every field in [Audit records](#audit-records), include attempt and result records for every Tool and the denials, show the real write's and the real move's Dry run, Idempotency key and Shopify request ID, the move's states and Expected quantities, and hold no Shopify response content.
 
 It ends with a table of results, which it can post to the smoke-test issue. It leaves the storewarden node, its state, the policy and the keys in place for the next run, and says how to remove them.
 
