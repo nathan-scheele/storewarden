@@ -1,6 +1,6 @@
 # Dependency behaviour storewarden relies on
 
-Facts about the MCP SDK (v1.8.0) and tsnet (tailscale.com v1.104.1) that shape storewarden's code and can't be seen from it. Each was checked against the module source in `~/go/pkg/mod`; re-check when a version changes.
+Facts about the MCP SDK (v1.8.0), tsnet (tailscale.com v1.104.1) and Shopify's Admin API that shape storewarden's code and can't be seen from it. The SDK and tsnet facts were checked against the module source in `~/go/pkg/mod`, the Shopify ones against the dev store; re-check when a version changes.
 
 ## MCP SDK (`github.com/modelcontextprotocol/go-sdk/mcp`)
 
@@ -22,3 +22,9 @@ Facts about the MCP SDK (v1.8.0) and tsnet (tailscale.com v1.104.1) that shape s
 - **Logs.** `Logf` is the verbose backend log, discarded when nil. `UserLogf` carries user-facing lines (the login URL, state changes) and defaults to `log.Printf`.
 - **State.** Node state is `<Dir>/tailscaled.state`. Without an auth key, tsnet logs `To start this tsnet server, restart with TS_AUTHKEY set, or go to: <login URL>`.
 - **Tailnet name.** `Up` returns `ipnstate.Status`, whose `CurrentTailnet.Name` names the tailnet the node joined.
+
+## Shopify Admin API (`2026-10`)
+
+- **Unused cost is refunded at once.** Shopify throttles a query on its requested cost, then charges only its actual cost: a query that requested 827 points was charged 6, and the `currentlyAvailable` it reported already counted the refund. So the client waits for a query's maximum cost, but queries drain the bucket only by what they really cost.
+- **The dev store's bucket.** The dev store is on the Plus plan: 20000 points, refilling at 1000 a second. Other plans differ; the client learns the figures from each response.
+- **Draining it on purpose.** An object field costs 1 whether or not the Store holds much data, so 990 aliases of `shop { id }` cost the full 990. `scripts/record-throttled.sh` uses this.

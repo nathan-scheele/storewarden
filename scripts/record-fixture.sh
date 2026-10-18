@@ -33,7 +33,7 @@ set +a
 api_version=$(sed -n 's/^const APIVersion = "\(.*\)"$/\1/p' internal/shopify/client.go)
 
 # The secret goes to curl on stdin, so it never shows in the process list.
-token=$(printf '%s' "$SHOPIFY_CLIENT_SECRET" | curl -sS --fail-with-body \
+token=$(printf '%s' "$SHOPIFY_CLIENT_SECRET" | curl -sS --fail-with-body --max-time 30 \
   -X POST "https://$SHOPIFY_STORE/admin/oauth/access_token" \
   --data-urlencode grant_type=client_credentials \
   --data-urlencode "client_id=$SHOPIFY_CLIENT_ID" \
@@ -48,7 +48,7 @@ print(json.dumps({"query": query, "variables": variables}))
 ' "$query" "$vars")
 
 # The token goes to curl as a header file on stdin, for the same reason.
-printf 'X-Shopify-Access-Token: %s\n' "$token" | curl -sS --fail-with-body \
+printf 'X-Shopify-Access-Token: %s\n' "$token" | curl -sS --fail-with-body --max-time 30 \
   -X POST "https://$SHOPIFY_STORE/admin/api/$api_version/graphql.json" \
   -H @- -H 'Content-Type: application/json' --data-binary "$body" |
   python3 -m json.tool --indent 2 > "$out"
