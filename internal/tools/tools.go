@@ -17,44 +17,67 @@ var readOnly = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 // "unset" differs from false; new(true) makes a *bool that points at true.
 var destructive = &mcp.ToolAnnotations{DestructiveHint: new(true), IdempotentHint: true}
 
-// Register adds the Tools to s: the Read tools always, and the Write tool
+// tool is one of storewarden's Tools.
+type tool struct {
+	def   *mcp.Tool
+	write bool // a Write tool, served only in Write mode
+	add   func(s *mcp.Server, client *shopify.Client)
+}
+
+// all is every Tool storewarden has, in the order tools/list shows them.
+var all = []tool{
+	readTool(&mcp.Tool{
+		Name:        "get_shop",
+		Description: "Get the Store's name, myshopify domain, plan and currency, and Shopify's current rate limit status.",
+	}, getShop),
+	readTool(&mcp.Tool{
+		Name:        "search_products",
+		Description: "Search the Store's products with Shopify's search syntax, one page at a time. Returns each product's ID, title, handle, status and total inventory, and a cursor for the next page.",
+	}, searchProducts),
+	readTool(&mcp.Tool{
+		Name:        "get_product",
+		Description: "Get one product by ID: its title, handle, status, tags, and its first 100 variants with their inventory item IDs.",
+	}, getProduct),
+	readTool(&mcp.Tool{
+		Name:        "get_inventory",
+		Description: "Get an inventory item's available and on-hand quantities at each location that stocks it, up to 100 locations.",
+	}, getInventory),
+	writeTool(&mcp.Tool{
+		Name:        setInventoryQuantityName,
+		Description: setInventoryQuantityDescription,
+	}, setInventoryQuantity),
+}
+
+// readTool makes a Read tool from its definition and the function that
+// makes its handler. It is generic because each Tool's handler has its own
+// input and output types, from which mcp.AddTool infers the Tool's schemas.
+func readTool[In, Out any](def *mcp.Tool, handler func(*shopify.Client) mcp.ToolHandlerFor[In, Out]) tool {
+	def.Annotations = readOnly
+	return tool{def: def, add: func(s *mcp.Server, client *shopify.Client) {
+		mcp.AddTool(s, def, handler(client))
+	}}
+}
+
+// writeTool makes a Write tool, like readTool.
+func writeTool[In, Out any](def *mcp.Tool, handler func(*shopify.Client) mcp.ToolHandlerFor[In, Out]) tool {
+	def.Annotations = destructive
+	return tool{def: def, write: true, add: func(s *mcp.Server, client *shopify.Client) {
+		mcp.AddTool(s, def, handler(client))
+	}}
+}
+
+// Register adds the Tools to s: the Read tools always, and the Write tools
 // only in Write mode. It returns every Tool's name, mapped to whether it
 // was added.
 func Register(s *mcp.Server, client *shopify.Client, writeMode bool) map[string]bool {
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "get_shop",
-		Description: "Get the Store's name, myshopify domain, plan and currency, and Shopify's current rate limit status.",
-		Annotations: readOnly,
-	}, getShop(client))
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "search_products",
-		Description: "Search the Store's products with Shopify's search syntax, one page at a time. Returns each product's ID, title, handle, status and total inventory, and a cursor for the next page.",
-		Annotations: readOnly,
-	}, searchProducts(client))
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "get_product",
-		Description: "Get one product by ID: its title, handle, status, tags, and its first 100 variants with their inventory item IDs.",
-		Annotations: readOnly,
-	}, getProduct(client))
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "get_inventory",
-		Description: "Get an inventory item's available and on-hand quantities at each location that stocks it, up to 100 locations.",
-		Annotations: readOnly,
-	}, getInventory(client))
-	if writeMode {
-		mcp.AddTool(s, &mcp.Tool{
-			Name:        setInventoryQuantityName,
-			Description: setInventoryQuantityDescription,
-			Annotations: destructive,
-		}, setInventoryQuantity(client))
+	served := map[string]bool{}
+	for _, t := range all {
+		served[t.def.Name] = !t.write || writeMode
+		if served[t.def.Name] {
+			t.add(s, client)
+		}
 	}
-	return map[string]bool{
-		"get_shop":               true,
-		"search_products":        true,
-		"get_product":            true,
-		"get_inventory":          true,
-		setInventoryQuantityName: writeMode,
-	}
+	return served
 }
 
 // getShopMaxCost is the most getShopQuery can cost, in Shopify's query cost
