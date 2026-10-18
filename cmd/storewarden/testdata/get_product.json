@@ -1,0 +1,72 @@
+{
+  "data": {
+    "product": {
+      "id": "gid://shopify/Product/8803714007201",
+      "title": "The Complete Snowboard",
+      "handle": "the-complete-snowboard",
+      "status": "ACTIVE",
+      "tags": [
+        "Premium",
+        "Snow",
+        "Snowboard",
+        "Sport",
+        "Winter"
+      ],
+      "variants": {
+        "nodes": [
+          {
+            "id": "gid://shopify/ProductVariant/48123931492513",
+            "title": "Ice",
+            "sku": null,
+            "inventoryItem": {
+              "id": "gid://shopify/InventoryItem/50260716388513"
+            }
+          },
+          {
+            "id": "gid://shopify/ProductVariant/48123931525281",
+            "title": "Dawn",
+            "sku": null,
+            "inventoryItem": {
+              "id": "gid://shopify/InventoryItem/50260716421281"
+            }
+          },
+          {
+            "id": "gid://shopify/ProductVariant/48123931558049",
+            "title": "Powder",
+            "sku": null,
+            "inventoryItem": {
+              "id": "gid://shopify/InventoryItem/50260716454049"
+            }
+          },
+          {
+            "id": "gid://shopify/ProductVariant/48123931590817",
+            "title": "Electric",
+            "sku": null,
+            "inventoryItem": {
+              "id": "gid://shopify/InventoryItem/50260716486817"
+            }
+          },
+          {
+            "id": "gid://shopify/ProductVariant/48123931623585",
+            "title": "Sunset",
+            "sku": null,
+            "inventoryItem": {
+              "id": "gid://shopify/InventoryItem/50260716519585"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 21,
+      "actualQueryCost": 4,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19996,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

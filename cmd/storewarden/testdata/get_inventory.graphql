@@ -1,0 +1,16 @@
+query GetInventory($id: ID!) {
+  inventoryItem(id: $id) {
+    inventoryLevels(first: 100) {
+      nodes {
+        location {
+          id
+          name
+        }
+        quantities(names: ["available", "on_hand"]) {
+          name
+          quantity
+        }
+      }
+    }
+  }
+}

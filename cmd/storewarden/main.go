@@ -20,6 +20,7 @@ import (
 	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/tsnet"
 
+	"github.com/nathan-scheele/storewarden/internal/audit"
 	"github.com/nathan-scheele/storewarden/internal/shopify"
 )
 
@@ -34,11 +35,13 @@ func main() {
 
 func run() error {
 	var (
-		store    = flag.String("store", "", "the Store's `domain`, <name>.myshopify.com (required)")
-		hostname = flag.String("hostname", "storewarden", "tailnet node `name`")
-		stateDir = flag.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
-		tags     = flag.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
-		debug    = flag.Bool("debug", false, "log at debug level, including tsnet's backend logs")
+		store       = flag.String("store", "", "the Store's `domain`, <name>.myshopify.com (required)")
+		hostname    = flag.String("hostname", "storewarden", "tailnet node `name`")
+		stateDir    = flag.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
+		tags        = flag.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
+		allowWrites = flag.Bool("allow-writes", false, "Write mode: serve the Write tool to Callers granted it")
+		auditPath   = flag.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
+		debug       = flag.Bool("debug", false, "log at debug level, including tsnet's backend logs")
 	)
 	flag.Parse()
 
@@ -64,6 +67,18 @@ func run() error {
 	if clientID == "" || clientSecret == "" {
 		return errors.New("SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET must be set")
 	}
+
+	// Opened before the tailnet node starts, so the deferred Close runs
+	// last: after the HTTP server and the node have shut down.
+	auditLog, err := audit.Open(*auditPath, logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := auditLog.Close(); err != nil {
+			logger.Error("closing audit log", "error", err)
+		}
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,9 +124,9 @@ func run() error {
 		return err
 	}
 
-	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second})
+	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second}, logger)
 	srv := &http.Server{
-		Handler:           newHandler(lc, client, logger),
+		Handler:           newHandler(lc, client, *allowWrites, auditLog, logger),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -121,7 +136,7 @@ func run() error {
 	if status.CurrentTailnet != nil {
 		tailnet = status.CurrentTailnet.Name
 	}
-	logger.Info("serving MCP", "store", *store, "hostname", *hostname, "tailnet", tailnet, "tailscale_ips", status.TailscaleIPs)
+	logger.Info("serving MCP", "store", *store, "hostname", *hostname, "tailnet", tailnet, "tailscale_ips", status.TailscaleIPs, "write_mode", *allowWrites)
 
 	select {
 	case err := <-serveErr:
@@ -134,7 +149,7 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("HTTP server shutdown", "error", err)
 	}
-	return nil // the deferred ts.Close runs next
+	return nil // the deferred ts.Close runs next, then the audit log's Close
 }
 
 func defaultStateDir() string {

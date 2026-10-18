@@ -1,0 +1,25 @@
+{
+  "data": {
+    "inventoryItem": {
+      "inventoryLevel": {
+        "quantities": [
+          {
+            "name": "available",
+            "quantity": 50
+          }
+        ]
+      }
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 3,
+      "actualQueryCost": 3,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19997,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

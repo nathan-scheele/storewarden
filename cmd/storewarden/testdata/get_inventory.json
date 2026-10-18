@@ -1,0 +1,53 @@
+{
+  "data": {
+    "inventoryItem": {
+      "inventoryLevels": {
+        "nodes": [
+          {
+            "location": {
+              "id": "gid://shopify/Location/85565997217",
+              "name": "Shop location"
+            },
+            "quantities": [
+              {
+                "name": "available",
+                "quantity": 50
+              },
+              {
+                "name": "on_hand",
+                "quantity": 50
+              }
+            ]
+          },
+          {
+            "location": {
+              "id": "gid://shopify/Location/85566029985",
+              "name": "My Custom Location"
+            },
+            "quantities": [
+              {
+                "name": "available",
+                "quantity": 50
+              },
+              {
+                "name": "on_hand",
+                "quantity": 50
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 30,
+      "actualQueryCost": 4,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19996,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "data": {
+    "inventorySetQuantities": {
+      "inventoryAdjustmentGroup": null,
+      "userErrors": [
+        {
+          "field": [
+            "input",
+            "quantities",
+            "0",
+            "changeFromQuantity"
+          ],
+          "message": "The changeFromQuantity argument no longer matches the persisted quantity.",
+          "code": "CHANGE_FROM_QUANTITY_STALE"
+        }
+      ]
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 10,
+      "actualQueryCost": 10,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19990,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

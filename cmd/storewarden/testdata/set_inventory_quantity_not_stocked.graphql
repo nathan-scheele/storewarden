@@ -1,0 +1,10 @@
+query GetAvailableQuantity($inventoryItemId: ID!, $locationId: ID!) {
+  inventoryItem(id: $inventoryItemId) {
+    inventoryLevel(locationId: $locationId) {
+      quantities(names: ["available"]) {
+        name
+        quantity
+      }
+    }
+  }
+}

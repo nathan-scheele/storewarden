@@ -201,24 +201,34 @@ finish() {
 
 # ── storewarden smoke-test helpers ────────────────────────────────────────
 #
-# Everything happens in a personal tailnet. storewarden and the test Caller
-# (cmd/storewarden-smoke) are both tsnet nodes that join whichever tailnet
+# Everything happens in a personal tailnet. storewarden and the two test
+# Callers (cmd/storewarden-smoke) are tsnet nodes that join whichever tailnet
 # issued their auth keys, so the Tailscale app on this machine, and the
 # tailnet it's logged into, are never used. The app's tailnet name is read
 # only to refuse to run in it.
+#
+# Part 1 (stages 9-13) checks the tailnet and the Grants with get_shop.
+# Part 2 (stages 14-19) grants one test Caller every Tool and another only
+# the Read tools, calls every Tool, takes one inventory item through a Dry
+# run, a real write, a retry and a stale write, puts it back, and checks
+# the Audit records.
 
 CAP="github.com/nathan-scheele/storewarden"
 ADMIN="https://login.tailscale.com/admin"
 RESULTS=()       # "PASS  check" or "FAIL  check"
 SW_PID=""        # storewarden
 SMOKE_PID=""     # storewarden-smoke, the test Caller; fds 3 (its stdin) and 4 (its stdout)
+RO_PID=""        # storewarden-smoke, the read-only test Caller; fds 5 and 6
+AUDIT=""         # storewarden's Audit records
+HELLO=""         # a test Caller's first line: the tailnet it joined
+SCENARIO='{}'    # the last Part 2 command's JSON result
 LOG=""           # storewarden's JSON log lines
 SMOKE_LOG=""     # storewarden-smoke's stderr
 SMOKE='{}'       # the last check's JSON result
 SEEN=""          # what the last check saw, in words
 MARK=0           # storewarden's log line count when the current check started
 OPENED_URL=""    # the last tsnet login URL shown
-WORK_TAILNET=""  # the Tailscale app's tailnet, never to be used
+APP_TAILNET=""   # the Tailscale app's tailnet, never to be used
 
 # record PASS|FAIL "check" notes one check's outcome for the results table.
 record() {
@@ -228,15 +238,19 @@ record() {
 }
 
 # visit URL prints a URL to open in the personal browser window. It never
-# opens the default browser, which may be signed into a work account.
+# opens the default browser, which may be signed into another Tailscale account.
 visit() { printf '  %s↗ open in your personal window:%s %s\n' "$GREEN" "$RESET" "$1"; }
 
-# cleanup stops both processes if the wizard exits early. Closing the test
+# cleanup stops every process if the wizard exits early. Closing a test
 # Caller's stdin makes it remove its node and exit.
 cleanup() {
   if [[ -n "$SMOKE_PID" ]]; then
     exec 3>&- || true
     wait "$SMOKE_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$RO_PID" ]]; then
+    exec 5>&- || true
+    wait "$RO_PID" 2>/dev/null || true
   fi
   if [[ -n "$SW_PID" ]] && kill -0 "$SW_PID" 2>/dev/null; then
     kill -INT "$SW_PID" 2>/dev/null || true
@@ -294,10 +308,10 @@ show_login_url() {
   fi
 }
 
-# require_tailnet NAME WHO stops the wizard if WHO joined the work tailnet.
+# require_tailnet NAME WHO stops the wizard if WHO joined the Tailscale app's tailnet.
 require_tailnet() {
-  if [[ -n "$WORK_TAILNET" && "$1" == "$WORK_TAILNET" ]]; then
-    warn "$2 joined \"$1\", the tailnet the Tailscale app is logged into. Stopping."
+  if [[ -n "$APP_TAILNET" && "$1" == "$APP_TAILNET" ]]; then
+    warn "$2 joined the tailnet the Tailscale app is logged into. Stopping."
     note "Remove '$2' from that tailnet's Machines page, and make the auth keys"
     note "again from your personal account."
     [[ "$2" == storewarden ]] && note "Then delete \"$STATE_DIR\" so the next run registers afresh."
@@ -332,6 +346,126 @@ poll() {
   done
 }
 
+# await_caller PID FD LOGFILE waits for a test Caller to join the tailnet and
+# sets HELLO to its first line. It stops the wizard if the Caller exits or
+# takes too long.
+await_caller() {
+  local deadline=$(( SECONDS + 180 ))
+  until read -r -t 2 -u "$2" HELLO; do
+    if ! kill -0 "$1" 2>/dev/null; then
+      warn "The test Caller exited. The end of its log:"
+      tail -n 20 "$3"
+      exit 1
+    fi
+    show_login_url "$3"
+    if (( SECONDS >= deadline )); then
+      warn "Timed out. The end of its log:"
+      tail -n 20 "$3"
+      exit 1
+    fi
+  done
+}
+
+# run_scenario CMD IN OUT sends a Part 2 command to a test Caller and sets
+# SCENARIO to its answer.
+run_scenario() {
+  printf '%s\n' "$1" >&"$2"
+  if ! read -r -t 300 -u "$3" SCENARIO; then SCENARIO='{}'; fi
+}
+
+# record_scenario records each check in SCENARIO, with what it saw, and a
+# FAIL if the command stopped early. Only failures put what was seen in the
+# results table, which may be posted to the public issue.
+record_scenario() {
+  local verdict check detail
+  while IFS=$'\t' read -r verdict check detail; do
+    if [[ "$verdict" == PASS ]]; then
+      record PASS "$check"
+      [[ -n "$detail" ]] && note "    $detail"
+    else
+      record FAIL "$check${detail:+ ($detail)}"
+    fi
+  done < <(python3 -c '
+import json, sys
+try:
+    s = json.loads(sys.argv[1])
+except ValueError:
+    s = {"error": "no answer from the test Caller"}
+for step in s.get("steps") or []:
+    detail = (step.get("detail") or "").replace("\t", " ")
+    print("PASS" if step.get("pass") else "FAIL", step["check"], detail, sep="\t")
+if s.get("error"):
+    print("FAIL", "the checks ran to the end", s["error"], sep="\t")
+' "$SCENARIO")
+}
+scenario_get() { json_get "$SCENARIO" "$1"; }
+
+# check_audit FILE EXECUTED SHOP TITLE checks the Audit records in FILE:
+# their fields, an attempt and a result for each Tool, the denials, the real
+# write's Dry run and Idempotency key (its request ID is EXECUTED), and that
+# no record holds Shopify response content (the shop name and product title
+# that Shopify returned). It prints one "PASS|FAIL<tab>check<tab>detail" line
+# per check.
+check_audit() {
+  python3 -c '
+import json, sys
+
+path, executed, shop, title = sys.argv[1:5]
+fields = ["time", "request_id", "phase", "caller", "tool", "args", "decision",
+          "reason", "dry_run", "idempotency_key", "outcome", "error", "duration_ms"]
+caller_fields = ["node_id", "node_name", "tags", "user"]
+tools = ["get_shop", "search_products", "get_product", "get_inventory", "set_inventory_quantity"]
+
+def report(ok, check, detail=""):
+    print("PASS" if ok else "FAIL", check, detail, sep="\t")
+
+text = open(path).read()
+records, unparsable = [], 0
+for line in text.splitlines():
+    try:
+        records.append(json.loads(line))
+    except ValueError:
+        unparsable += 1
+incomplete = [r for r in records
+              if any(f not in r for f in fields)
+              or any(f not in (r.get("caller") or {}) for f in caller_fields)]
+report(records and not unparsable and not incomplete,
+       "every Audit record is JSON with every documented field",
+       f"{len(records)} records, {unparsable} not JSON, {len(incomplete)} missing fields")
+
+seen = {(r.get("tool"), r.get("phase")) for r in records}
+lacking = [t for t in tools if (t, "attempt") not in seen or (t, "result") not in seen]
+report(not lacking, "every Tool called has attempt and result records",
+       "missing: " + ", ".join(lacking) if lacking else "")
+
+denied = [r for r in records if r.get("phase") == "denied"]
+report(any(r.get("tool") == "" for r in denied)
+       and any(r.get("tool") == "set_inventory_quantity" for r in denied),
+       "the 403s and the read-only Caller'"'"'s Write tool call have denial records",
+       f"{len(denied)} denial records")
+
+write = [r for r in records if r.get("request_id") == executed]
+result = [r for r in write if r.get("phase") == "result"]
+report(executed and len(write) == 2
+       and all(r.get("dry_run") is False and r.get("idempotency_key") for r in write)
+       and result and (result[0].get("shopify") or {}).get("request_id"),
+       "the real write'"'"'s records show dry_run false, its Idempotency key and Shopify'"'"'s request ID",
+       f"{len(write)} records")
+
+leaked = [name for name, value in (("shop name", shop), ("product title", title))
+          if value and value in text]
+report(not leaked, "no Audit record holds Shopify response content",
+       "found the " + " and the ".join(leaked) if leaked else "")
+' "$@"
+}
+
+check_all_granted() {
+  smoke_check
+  local tools; tools=$(smoke_get tools)
+  [[ "$(smoke_get mcp)" == 200 && ",$tools," == *",set_inventory_quantity,"* &&
+     $(tr -cd , <<<"$tools" | wc -c) -eq 4 ]]
+}
+
 check_healthy()     { smoke_check; [[ "$(smoke_get healthz)" == 200 && "$(smoke_get healthz_body)" == healthy ]]; }
 check_granted() {
   smoke_check
@@ -342,13 +476,17 @@ check_warned()      { check_granted && logged "$MARK" WARN delete_everything; }
 check_typo_denied() { smoke_check; [[ "$(smoke_get mcp)" == 403 ]] && logged "$MARK" ERROR "unknown field"; }
 check_no_cap()      { smoke_check; [[ "$(smoke_get mcp)" == 403 ]] && logged "$MARK" INFO "no $CAP capability"; }
 
-# policy_file VALUE prints a whole policy file for the personal tailnet, with
-# VALUE as the storewarden capability value. With no VALUE, the test Caller's
-# grant has no app capability at all.
+# policy_file VALUE [RO_VALUE] prints a whole policy file for the personal
+# tailnet, with VALUE as the test Caller's storewarden capability value. With
+# no VALUE, its grant has no app capability at all. With RO_VALUE, the
+# read-only test Caller gets a grant with that value too.
 policy_file() {
-  local app=""
+  local app="" ro=""
   if [[ -n "${1:-}" ]]; then
     app=$(printf ',\n      "app": {\n        "%s": [%s]\n      }' "$CAP" "$1")
+  fi
+  if [[ -n "${2:-}" ]]; then
+    ro=$(printf '\n    // The read-only test Caller may use the Tools named here.\n    {\n      "src": ["tag:storewarden-smoke-ro"],\n      "dst": ["tag:storewarden"],\n      "ip":  ["tcp:80"],\n      "app": {\n        "%s": [%s]\n      }\n    },' "$CAP" "$2")
   fi
   cat <<EOF
 // storewarden smoke test (scripts/smoke-tailnet.sh).
@@ -357,6 +495,7 @@ policy_file() {
   "tagOwners": {
     "tag:storewarden":       ["autogroup:admin"],
     "tag:storewarden-smoke": ["autogroup:admin"],
+    "tag:storewarden-smoke-ro": ["autogroup:admin"],
   },
   "grants": [
     // Tailscale's default: every device can reach every other device.
@@ -366,17 +505,17 @@ policy_file() {
       "src": ["tag:storewarden-smoke"],
       "dst": ["tag:storewarden"],
       "ip":  ["tcp:80"]$app
-    },
+    },$ro
   ],
 }
 EOF
 }
 
-# show_policy [VALUE] prints the whole policy file and copies it to the
-# clipboard, where there is one.
+# show_policy [VALUE [RO_VALUE]] prints the whole policy file and copies it
+# to the clipboard, where there is one.
 show_policy() {
   local policy
-  policy=$(policy_file "${1:-}")
+  policy=$(policy_file "${1:-}" "${2:-}")
   printf '\n%s%s%s\n\n' "$BOLD" "$policy" "$RESET"
   if command -v pbcopy >/dev/null 2>&1; then
     printf '%s\n' "$policy" | pbcopy
@@ -384,18 +523,18 @@ show_policy() {
   fi
 }
 
-# edit_policy WHAT [VALUE] walks through replacing the policy file.
+# edit_policy WHAT [VALUE [RO_VALUE]] walks through replacing the policy file.
 edit_policy() {
   visit "$ADMIN/acls/file"
   step "$1"
   step "Select everything in the policy file, paste this over it, then Save:"
-  show_policy "${2:-}"
+  show_policy "${2:-}" "${3:-}"
   pause "Saved? Press Enter"
 }
 
 run_wizard() {
 
-TOTAL_STAGES=15
+TOTAL_STAGES=21
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 trap cleanup EXIT
@@ -404,7 +543,7 @@ case "$(uname)" in
   *)      STATE_DIR="${STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/storewarden}" ;;
 esac
 
-banner "storewarden tailnet smoke test (#2)"
+banner "storewarden smoke test (#9): the tailnet, every Tool and the Write tool"
 
 # ── 1 ─────────────────────────────────────────────────────────────────────
 stage "Preflight"
@@ -421,15 +560,15 @@ if [[ -z "$SHOPIFY_STORE" || -z "$SHOPIFY_CLIENT_ID" || -z "$SHOPIFY_CLIENT_SECR
   missing=1
 fi
 (( missing )) && exit 1
-WORK_TAILNET=$(tailscale status --json 2>/dev/null | python3 -c '
+APP_TAILNET=$(tailscale status --json 2>/dev/null | python3 -c '
 import json, sys
 print((json.load(sys.stdin).get("CurrentTailnet") or {}).get("Name", ""))
 ' 2>/dev/null || true)
 say "Store: $SHOPIFY_STORE"
 say "Everything runs in your personal tailnet. The Tailscale app on this"
 say "machine isn't used."
-if [[ -n "$WORK_TAILNET" ]]; then
-  note "The app is logged into \"$WORK_TAILNET\". The wizard stops if anything joins it."
+if [[ -n "$APP_TAILNET" ]]; then
+  note "The wizard stops if anything joins the tailnet the Tailscale app is logged into."
 fi
 pause
 
@@ -437,7 +576,7 @@ pause
 stage "Personal Tailscale account"
 step "Open a private window, or a browser profile, signed into your personal"
 step "Tailscale account. Create one at https://login.tailscale.com/start if needed."
-step "Check the tailnet name at the top of the admin console: it must not be your work one."
+step "Check the tailnet name at the top of the admin console: it must not be the one the Tailscale app uses."
 note "From here on the wizard prints URLs for that window instead of opening your"
 note "default browser."
 pause "In your personal admin console? Press Enter"
@@ -478,18 +617,34 @@ write_env TS_SMOKE_AUTHKEY "$TS_SMOKE_AUTHKEY"
 pause
 
 # ── 6 ─────────────────────────────────────────────────────────────────────
+stage "Auth key for the read-only test Caller"
+say "Part 2 adds a second test Caller, granted only the Read tools, to check"
+say "that the Write tool is hidden from it. It needs its own tag, so its own key,"
+say "saved in $ENV_FILE as well."
+if [[ -z "$(_existing TS_SMOKE_RO_AUTHKEY || true)" ]]; then
+  visit "$ADMIN/settings/keys"
+  step "Generate auth key… → Reusable on, Ephemeral on, Tags: tag:storewarden-smoke-ro."
+  note "The tag exists once the policy from stage 3 is saved."
+fi
+ask_secret TS_SMOKE_RO_AUTHKEY "Paste the auth key (tskey-auth-…):"
+write_env TS_SMOKE_RO_AUTHKEY "$TS_SMOKE_RO_AUTHKEY"
+pause
+
+# ── 7 ─────────────────────────────────────────────────────────────────────
 stage "Start storewarden"
-local work
-work=$(mktemp -d)
-LOG="$work/storewarden.log"
-SMOKE_LOG="$work/storewarden-smoke.log"
+local tmpdir
+tmpdir=$(mktemp -d)
+LOG="$tmpdir/storewarden.log"
+SMOKE_LOG="$tmpdir/storewarden-smoke.log"
+AUDIT="$tmpdir/audit.jsonl"
 say "Building storewarden and the test Caller…"
-make build BIN="$work"
+make build BIN="$tmpdir"
 # Secrets reach the processes through their environment, never their arguments.
 (
   export SHOPIFY_CLIENT_ID SHOPIFY_CLIENT_SECRET
   if [[ -n "$TS_AUTHKEY" ]]; then export TS_AUTHKEY; fi
-  exec "$work/storewarden" --store "$SHOPIFY_STORE" --state-dir "$STATE_DIR"
+  exec "$tmpdir/storewarden" --store "$SHOPIFY_STORE" --state-dir "$STATE_DIR" \
+    --allow-writes --audit-log "$AUDIT"
 ) >"$LOG" 2>&1 &
 SW_PID=$!
 say "Waiting for it to join the tailnet…"
@@ -523,38 +678,26 @@ if ! confirm "Is \"$sw_tailnet\" your personal tailnet?"; then
 fi
 record PASS "storewarden joined the personal tailnet and is serving"
 note "Logs: $LOG"
+note "Audit records: $AUDIT"
+note "It runs in Write mode, but only the Grant in Part 2 names the Write tool."
 step "Optional: on the Machines page, 'storewarden' shows tag:storewarden and no Ephemeral badge."
 pause
 
-# ── 7 ─────────────────────────────────────────────────────────────────────
+# ── 8 ─────────────────────────────────────────────────────────────────────
 stage "Start the test Caller"
-mkfifo "$work/smoke.in" "$work/smoke.out"
+mkfifo "$tmpdir/smoke.in" "$tmpdir/smoke.out"
 (
   TS_AUTHKEY="$TS_SMOKE_AUTHKEY"
   export TS_AUTHKEY
-  exec "$work/storewarden-smoke" --target "$ip"
-) <"$work/smoke.in" >"$work/smoke.out" 2>"$SMOKE_LOG" &
+  exec "$tmpdir/storewarden-smoke" --target "$ip"
+) <"$tmpdir/smoke.in" >"$tmpdir/smoke.out" 2>"$SMOKE_LOG" &
 SMOKE_PID=$!
-exec 3>"$work/smoke.in"
-exec 4<"$work/smoke.out"
+exec 3>"$tmpdir/smoke.in"
+exec 4<"$tmpdir/smoke.out"
 say "Waiting for it to join the tailnet…"
-local hello="" smoke_tailnet
-deadline=$(( SECONDS + 180 ))
-until read -r -t 2 hello <&4; do
-  if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
-    SMOKE_PID=""
-    warn "The test Caller exited. The end of its log:"
-    tail -n 20 "$SMOKE_LOG"
-    exit 1
-  fi
-  show_login_url "$SMOKE_LOG"
-  if (( SECONDS >= deadline )); then
-    warn "Timed out. The end of its log:"
-    tail -n 20 "$SMOKE_LOG"
-    exit 1
-  fi
-done
-smoke_tailnet=$(json_get "$hello" tailnet)
+local smoke_tailnet
+await_caller "$SMOKE_PID" 4 "$SMOKE_LOG"
+smoke_tailnet=$(json_get "$HELLO" tailnet)
 require_tailnet "$smoke_tailnet" storewarden-smoke
 if [[ "$smoke_tailnet" != "$sw_tailnet" ]]; then
   warn "The test Caller joined \"$smoke_tailnet\", not \"$sw_tailnet\". Stopping."
@@ -565,7 +708,7 @@ record PASS "the test Caller joined the same tailnet as storewarden"
 note "Logs: $SMOKE_LOG"
 pause
 
-# ── 8 ─────────────────────────────────────────────────────────────────────
+# ── 9 ─────────────────────────────────────────────────────────────────────
 stage "Call get_shop over the tailnet"
 say "The first connection between the nodes can take a few seconds."
 if poll 60 check_healthy; then record PASS "/healthz says healthy"
@@ -585,7 +728,7 @@ else
 fi
 pause
 
-# ── 9 ─────────────────────────────────────────────────────────────────────
+# ── 10 ────────────────────────────────────────────────────────────────────
 stage "Tailnet only"
 local listeners
 listeners=$(lsof -nP -a -p "$SW_PID" -iTCP -sTCP:LISTEN 2>/dev/null || true)
@@ -598,7 +741,7 @@ fi
 note "Port 80 exists only inside tsnet, on the tailnet address."
 pause
 
-# ── 10 ────────────────────────────────────────────────────────────────────
+# ── 11 ────────────────────────────────────────────────────────────────────
 stage "Unknown Tool → warning"
 MARK=$(log_lines)
 edit_policy "Add a Tool storewarden doesn't have (delete_everything)." '{"tools": ["get_shop", "delete_everything"]}'
@@ -606,7 +749,7 @@ if poll 120 check_warned; then record PASS "unknown Tool name logs a warning; ge
 else record FAIL "unknown Tool name logs a warning; get_shop still granted"; fi
 pause
 
-# ── 11 ────────────────────────────────────────────────────────────────────
+# ── 12 ────────────────────────────────────────────────────────────────────
 stage "Typo → deny"
 MARK=$(log_lines)
 edit_policy "Make a typo: \"tool\" instead of \"tools\"." '{"tool": ["get_shop"]}'
@@ -614,7 +757,7 @@ if poll 120 check_typo_denied; then record PASS "unknown field in a Grant → 40
 else record FAIL "unknown field in a Grant → 403 and an ERROR log"; fi
 pause
 
-# ── 12 ────────────────────────────────────────────────────────────────────
+# ── 13 ────────────────────────────────────────────────────────────────────
 stage "No Grant → 403"
 MARK=$(log_lines)
 edit_policy "Take away the app capability; the grant keeps only ip."
@@ -627,7 +770,94 @@ if poll 120 check_granted; then record PASS "get_shop granted again"
 else record FAIL "get_shop granted again"; fi
 pause
 
-# ── 13 ────────────────────────────────────────────────────────────────────
+# ── 14 ────────────────────────────────────────────────────────────────────
+stage "Part 2: grant every Tool"
+say "Part 1 is done. Part 2 grants the test Caller all five Tools, and a second,"
+say "read-only test Caller only the four Read tools."
+edit_policy "Grant every Tool to the test Caller, and the Read tools to the read-only one." \
+  '{"tools": ["get_shop", "search_products", "get_product", "get_inventory", "set_inventory_quantity"]}' \
+  '{"tools": ["get_shop", "search_products", "get_product", "get_inventory"]}'
+if poll 120 check_all_granted; then record PASS "with Write mode on, a Grant naming all five Tools shows all five"
+else record FAIL "with Write mode on, a Grant naming all five Tools shows all five (tools: $(smoke_get tools))"; fi
+say "Starting the read-only test Caller…"
+local ro_log="$tmpdir/storewarden-smoke-ro.log"
+mkfifo "$tmpdir/ro.in" "$tmpdir/ro.out"
+(
+  TS_AUTHKEY="$TS_SMOKE_RO_AUTHKEY"
+  export TS_AUTHKEY
+  exec "$tmpdir/storewarden-smoke" --target "$ip" \
+    --hostname storewarden-smoke-ro --tags tag:storewarden-smoke-ro
+) <"$tmpdir/ro.in" >"$tmpdir/ro.out" 2>"$ro_log" &
+RO_PID=$!
+exec 5>"$tmpdir/ro.in"
+exec 6<"$tmpdir/ro.out"
+await_caller "$RO_PID" 6 "$ro_log"
+local ro_tailnet
+ro_tailnet=$(json_get "$HELLO" tailnet)
+require_tailnet "$ro_tailnet" storewarden-smoke-ro
+if [[ "$ro_tailnet" != "$sw_tailnet" ]]; then
+  warn "The read-only test Caller joined a different tailnet. Stopping."
+  note "Make its auth key in the same personal tailnet as storewarden's."
+  exit 1
+fi
+record PASS "the read-only test Caller joined the same tailnet"
+pause
+
+# ── 15 ────────────────────────────────────────────────────────────────────
+stage "Every Tool, and the Write tool from Dry run to retry"
+say "The test Caller now calls each Read tool, then picks the first stocked"
+say "inventory item and, on the development store:"
+step "makes a Dry run of adding 1 to its available quantity;"
+step "makes the change for real, with an Idempotency key and Expected quantity;"
+step "retries that call with the same key, which must not add 1 again;"
+step "tries another change with the old Expected quantity, which must be refused;"
+step "puts the quantity back."
+pause "Press Enter to run it (it takes a few seconds)"
+run_scenario tools 3 4
+record_scenario
+local shop_name product_title executed_id restored_id
+shop_name=$(scenario_get shop_name)
+product_title=$(scenario_get product_title)
+executed_id=$(scenario_get executed_request_id)
+restored_id=$(scenario_get restored_request_id)
+if [[ -n "$product_title" ]]; then
+  note "Item: $product_title, $(scenario_get item_id) at $(scenario_get location_id);"
+  note "available was $(scenario_get before)."
+fi
+pause
+
+# ── 16 ────────────────────────────────────────────────────────────────────
+stage "The change in Shopify's inventory history"
+if [[ -n "$executed_id" ]]; then
+  local handle product variant
+  handle=${SHOPIFY_STORE%.myshopify.com}
+  product=$(scenario_get product_id); product=${product##*/}
+  variant=$(scenario_get variant_id); variant=${variant##*/}
+  say "Open this in the browser where you're signed into the development store's"
+  say "admin, then open the variant's inventory adjustment history:"
+  printf '  %s↗%s https://admin.shopify.com/store/%s/products/%s/variants/%s\n' \
+    "$GREEN" "$RESET" "$handle" "$product" "$variant"
+  say "Look for the two changes, with these references:"
+  note "  storewarden://audit/$executed_id   (+1)"
+  [[ -n "$restored_id" ]] && note "  storewarden://audit/$restored_id   (put back)"
+  if confirm "Does the history show the change with its storewarden:// reference?"; then
+    record PASS "the change shows in Shopify's inventory history with its storewarden:// reference (checked by hand)"
+  else
+    record FAIL "the change shows in Shopify's inventory history with its storewarden:// reference (checked by hand)"
+  fi
+else
+  warn "There was no real write to look for."
+  record FAIL "the change shows in Shopify's inventory history (no real write was made)"
+fi
+pause
+
+# ── 17 ────────────────────────────────────────────────────────────────────
+stage "The read-only test Caller"
+run_scenario read-only 5 6
+record_scenario
+pause
+
+# ── 18 ────────────────────────────────────────────────────────────────────
 stage "Clean shutdown"
 MARK=$(log_lines)
 say "Sending SIGINT to storewarden…"
@@ -642,21 +872,36 @@ else
 fi
 pause
 
-# ── 14 ────────────────────────────────────────────────────────────────────
-stage "Tidy up"
-say "Stopping the test Caller; it removes its own node from the tailnet."
-exec 3>&-
-wait "$SMOKE_PID" || true
-SMOKE_PID=""
-say "Left in place, for the next run and the #9 smoke test:"
-note "  - the 'storewarden' node, and its state in \"$STATE_DIR\""
-note "  - the tags and grant in the policy file"
-note "  - the test Caller's key, as TS_SMOKE_AUTHKEY in $ENV_FILE"
-say "To remove them: Machines → storewarden → Remove; delete the policy lines;"
-say "revoke the key under Settings → Keys and delete it from $ENV_FILE."
+# ── 19 ────────────────────────────────────────────────────────────────────
+stage "Audit records"
+say "Reading $AUDIT, now that storewarden has flushed and closed it."
+local verdict check detail
+while IFS=$'\t' read -r verdict check detail; do
+  if [[ "$verdict" == PASS ]]; then
+    record PASS "$check"
+    [[ -n "$detail" ]] && note "    $detail"
+  else
+    record FAIL "$check${detail:+ ($detail)}"
+  fi
+done < <(check_audit "$AUDIT" "$executed_id" "$shop_name" "$product_title")
 pause
 
-# ── 15 ────────────────────────────────────────────────────────────────────
+# ── 20 ────────────────────────────────────────────────────────────────────
+stage "Tidy up"
+say "Stopping the test Callers; each removes its own node from the tailnet."
+exec 3>&- 5>&-
+wait "$SMOKE_PID" || true
+wait "$RO_PID" || true
+SMOKE_PID="" RO_PID=""
+say "Left in place, for the next run:"
+note "  - the 'storewarden' node, and its state in \"$STATE_DIR\""
+note "  - the tags and grants in the policy file"
+note "  - the test Callers' keys, as TS_SMOKE_AUTHKEY and TS_SMOKE_RO_AUTHKEY in $ENV_FILE"
+say "To remove them: Machines → storewarden → Remove; delete the policy lines;"
+say "revoke the keys under Settings → Keys and delete them from $ENV_FILE."
+pause
+
+# ── 21 ────────────────────────────────────────────────────────────────────
 stage "Results"
 local r passed=0 failed=0 table=""
 for r in "${RESULTS[@]}"; do
@@ -669,15 +914,15 @@ say "$passed passed, $failed failed."
 note "Logs: $LOG"
 printf '\n'
 # The comment names no tailnet, node or address: the repo is public.
-if confirm "Post this table as a comment on issue #2?"; then
+if confirm "Post this table as a comment on issue #9?"; then
   local body
-  body="Manual tailnet check with \`scripts/smoke-tailnet.sh\` at $(git rev-parse --short HEAD): $passed passed, $failed failed."$'\n\n'
+  body="Manual smoke test with \`scripts/smoke-tailnet.sh\` at $(git rev-parse --short HEAD), against the development store: $passed passed, $failed failed."$'\n\n'
   body+="| Result | Check |"$'\n'"|---|---|"$'\n'"$table"$'\n'
-  body+="The calls were made by \`cmd/storewarden-smoke\`, a separate ephemeral tailnet node, with the official MCP SDK client."
-  if gh issue comment 2 -R nathan-scheele/storewarden --body "$body" >/dev/null; then
-    printf '  %s✓ posted%s to issue #2\n' "$GREEN" "$RESET"
+  body+="The calls were made by \`cmd/storewarden-smoke\`, two separate ephemeral tailnet nodes, with the official MCP SDK client. The inventory history was checked by hand in the Shopify admin. Not covered: capturing a live throttled response."
+  if gh issue comment 9 -R nathan-scheele/storewarden --body "$body" >/dev/null; then
+    printf '  %s✓ posted%s to issue #9\n' "$GREEN" "$RESET"
   else
-    SKIPPED+=("posting the results to issue #2")
+    SKIPPED+=("posting the results to issue #9")
   fi
 fi
 

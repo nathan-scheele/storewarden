@@ -1,0 +1,102 @@
+package shopify
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
+
+// GraphQLError is one entry in a response's top-level "errors" list.
+type GraphQLError struct {
+	Message string
+	Code    string // extensions.code, such as "THROTTLED"; "" if Shopify sent none
+}
+
+// GraphQLErrors is the error Query returns when Shopify answers with
+// top-level GraphQL errors. Get it with errors.As.
+type GraphQLErrors []GraphQLError
+
+func (e GraphQLErrors) Error() string {
+	return "shopify: graphql: " + strings.Join(each(e, func(ge GraphQLError) string { return ge.Message }), "; ")
+}
+
+// Codes returns the errors' codes, comma-separated, without Shopify's
+// messages, which can quote the Store's data.
+func (e GraphQLErrors) Codes() string {
+	return joinCodes(each(e, func(ge GraphQLError) string { return ge.Code }))
+}
+
+// has reports whether any of the errors has the given code.
+func (e GraphQLErrors) has(code string) bool {
+	for _, ge := range e {
+		if ge.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// UserError is one entry in a mutation's "userErrors" list: Shopify ran the
+// mutation but refused the input.
+type UserError struct {
+	Field   []string `json:"field"`
+	Message string   `json:"message"`
+	Code    string   `json:"code"` // set only if the query asks for it
+}
+
+// UserErrors is the error Query returns when a mutation reports user
+// errors. Get it with errors.As.
+type UserErrors []UserError
+
+func (e UserErrors) Error() string {
+	return "shopify: user errors: " + strings.Join(each(e, func(ue UserError) string { return ue.Message }), "; ")
+}
+
+// Codes returns the user errors' codes, like GraphQLErrors.Codes.
+func (e UserErrors) Codes() string {
+	return joinCodes(each(e, func(ue UserError) string { return ue.Code }))
+}
+
+// each returns part of every error in errs, such as its message, in order.
+// It is generic so that GraphQLErrors and UserErrors can both use it.
+func each[E any](errs []E, part func(E) string) []string {
+	parts := make([]string, len(errs))
+	for i, e := range errs {
+		parts[i] = part(e)
+	}
+	return parts
+}
+
+// joinCodes joins error codes with commas, showing a missing one as "none".
+func joinCodes(codes []string) string {
+	for i, c := range codes {
+		if c == "" {
+			codes[i] = "none"
+		}
+	}
+	return strings.Join(codes, ", ")
+}
+
+// findUserErrors returns the user errors in a response's data. A mutation's
+// result sits under its own name at the top of data, and holds its user
+// errors in a "userErrors" list, so only the top level is searched.
+func findUserErrors(data json.RawMessage) UserErrors {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return nil
+	}
+	var found UserErrors
+	for _, field := range fields {
+		// Only objects can hold userErrors; a field may also be a list or null.
+		if !bytes.HasPrefix(bytes.TrimSpace(field), []byte("{")) {
+			continue
+		}
+		var payload struct {
+			UserErrors UserErrors `json:"userErrors"`
+		}
+		if json.Unmarshal(field, &payload) == nil {
+			found = append(found, payload.UserErrors...)
+		}
+	}
+	return found
+}
