@@ -8,14 +8,13 @@ storewarden is a single Go binary. It joins a tailnet with `tsnet` and serves a 
 - Authorization lives in the tailnet policy file, not in storewarden's config.
 - Write tools are off by default, dry run by default, idempotent and compare-and-swap.
 - Every attempted Tool call leaves an Audit record.
-- Shopify's cost-based rate limit is respected.
+- Shopify's cost-based rate limit is respected, and no one Caller can use all of it.
 - Reachable only over the tailnet. Never public.
 
 ## Non-goals (v1)
 
 - A raw GraphQL Tool, or any Tool not listed below.
 - More than one Store per process. Run a second instance instead.
-- Per-Caller rate quotas.
 - MCP sampling, elicitation, resources or prompts (see [ADR 0001](adr/0001-stateless-mcp-for-per-request-identity.md)).
 - HTTPS on the tailnet (WireGuard already encrypts tailnet traffic).
 - Running behind `tailscale serve` or any proxy. That would break WhoIs.
@@ -175,6 +174,13 @@ Write tools are guarded by two keys. They are only registered when the server st
   - After every response, record `extensions.cost.throttleStatus` (`currentlyAvailable`, `maximumAvailable`, `restoreRate`). Limits are never hardcoded; until the first response arrives, the bucket assumes it's full.
   - Before a call, estimate the refill needed for the query's known maximum cost. Each Tool passes that cost, a constant checked against a recording (`internal/tools/cost_test.go`), so the throttle can decide from the very first call. `search_products` passes its cost at the largest page size, 50, whatever page size the Caller asks for. A fixed maximum is always safe, because Shopify works out a query's requested cost from its text and variables before running it ([rate limits](https://shopify.dev/docs/apps/build/apis/graphql-admin/rate-limits)). If the wait ends before the request's deadline, wait. If not, fail fast with a retryable error (`shopify.ThrottledError`) that includes the suggested wait. Every Tool call gets a 30-second deadline (`callTimeout` in `internal/tools`), so this can happen; the Caller sees a Tool error starting `retryable: ` that ends `Retry the same call in <wait>`.
   - On `THROTTLED`, retry once after the calculated wait. Errors and `userErrors` come back as typed Go errors.
+- **Quotas** ([ADR 0005](adr/0005-quotas-set-by-the-operator-not-in-grants.md)): every Caller has its own Quota, a cost bucket beside the Store's that shares its bucket logic and injected clock.
+  - Its maximum and restore rate are `--quota-share` times the Store bucket's learned `maximumAvailable` and `restoreRate`, so they follow the Store's plan. Until Shopify has reported them, Quotas refuse nothing. A new Caller's Quota starts full.
+  - The client takes an opaque Quota key from the request context (`shopify.WithQuotaKey`), in the style of the observer hook, and knows nothing about Tailscale. `tools.Audited` puts the Caller's node stable ID there, after the attempt record. A query with no key has no Quota.
+  - Every request sent for the Caller is charged at the query's known maximum cost, the same constant the throttle uses, including Dry run reads and a throttled retry. Charges are never reconciled with the actual cost or refunded, even if the Store bucket then refuses the query.
+  - The Quota is checked first and never waits: if it can't cover the cost, the query fails at once with a `shopify.QuotaError` carrying the suggested wait. The Caller sees the retryable form above, worded as its Quota: `retryable: your Quota of the Store's rate limit is used up, so nothing was done. Retry the same call in <wait>`. The Store bucket then keeps its wait-or-fail-fast rule.
+  - The refusal is an allowed call that failed: an attempt and a result record whose error names the Quota, and no `denied` record.
+  - Quotas live in a map from key to bucket behind a mutex, in memory only, reset on restart. Nothing is evicted: there is one per tailnet node at most. `Client.Quota` reports a Quota's state.
 - Shopify's `X-Request-Id` response header goes into the Audit record.
 
 ## Audit (`internal/audit`)
@@ -203,6 +209,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 | `--state-dir` | `$UserConfigDir/storewarden` | tsnet state; persistent, not ephemeral |
 | `--tags` | `tag:storewarden` | passed to `AdvertiseTags` |
 | `--allow-writes` | `false` | Write mode |
+| `--quota-share` | `0.5` | each Caller's Quota as a share of the Store's rate limit, in (0, 1]; anything else refuses to start |
 | `--audit-log` | `-` | Audit record destination |
 | `--debug` | `false` | debug-level logs, including tsnet's `Logf` |
 
@@ -232,7 +239,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 | Public exposure | No Funnel, serve or host listener code path; CI guard; tsnet clears stale serve config at startup |
 | Credential leak | Secrets only from env; never logged; token kept only in memory |
 | Unaudited action | Audit fails closed |
-| Granted Caller draining the cost bucket | Accepted v1 risk; per-Caller quotas are future work |
+| Granted Caller draining the cost bucket | A Quota per Caller (`--quota-share`). Accepted risk: Quotas are per node, so a Caller that can add tailnet nodes gets one Quota per node |
 | Audit log tampering on the host | Out of scope; ship logs off-host |
 
 ## Testing and CI
@@ -245,7 +252,7 @@ Two test seams:
   - The audit sink: an `io.Writer` that can be made to fail.
 
   Driven by the SDK client (`StreamableClientTransport`) over `httptest`. Covers authorization, list filtering, Write mode, dry run vs execute, Audit records and fail closed.
-- **Shopify client.** An `httptest` server plus an injected clock. Covers token reissue, the throttle's wait-vs-fail-fast decision, the `THROTTLED` retry and typed errors.
+- **Shopify client.** An `httptest` server plus an injected clock. Covers token reissue, the throttle's wait-vs-fail-fast decision, the `THROTTLED` retry, typed errors, and Quotas: their limits, refill, fail-fast refusal, independence per key, order before the Store bucket and the charge for a throttled retry.
 - GitHub Actions (`.github/workflows/ci.yml`): `go vet`, `staticcheck`, `go test -race ./...`, `govulncheck`, plus the never-public check. Each step is a make target; `make ci` runs them all locally.
 - Manual: `make smoke`, a documented run against a dev store.
 

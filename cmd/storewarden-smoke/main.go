@@ -2,9 +2,10 @@
 // smoke test (scripts/smoke-tailnet.sh). It joins the tailnet as its own
 // ephemeral, tagged node, prints the tailnet's name as one JSON line, then
 // reads commands from stdin, one per line, and answers each with one JSON
-// line. "check" calls storewarden once, as an MCP client. "tools" and
-// "read-only" run Part 2 of the smoke test (tools.go). It stops at the end
-// of stdin and removes its node from the tailnet.
+// line. "check" calls storewarden once, as an MCP client. "tools",
+// "read-only", "quota" and "quota-other" run Part 2 of the smoke test
+// (tools.go, quota.go). It stops at the end of stdin and removes its node
+// from the tailnet.
 package main
 
 import (
@@ -100,13 +101,23 @@ func run() error {
 	base := "http://" + *target
 	in := bufio.NewScanner(os.Stdin)
 	for in.Scan() {
-		switch in.Text() {
+		// "quota" and "quota-other" take an inventory item ID after a space.
+		command, item, _ := strings.Cut(in.Text(), " ")
+		switch command {
 		case "check":
 			err = out.Encode(check(ctx, hc, base))
 		case "tools":
 			err = out.Encode(withSession(ctx, hc, base, runTools))
 		case "read-only":
 			err = out.Encode(withSession(ctx, hc, base, runReadOnly))
+		case "quota":
+			err = out.Encode(withSession(ctx, hc, base, func(ctx context.Context, s session) scenario {
+				return runQuota(ctx, s, item)
+			}))
+		case "quota-other":
+			err = out.Encode(withSession(ctx, hc, base, func(ctx context.Context, s session) scenario {
+				return runQuotaOther(ctx, s, item)
+			}))
 		default:
 			err = out.Encode(map[string]string{"error": "unknown command " + in.Text()})
 		}

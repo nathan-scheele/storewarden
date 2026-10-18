@@ -53,6 +53,7 @@ type Client struct {
 	logger       *slog.Logger
 	clock        clock
 	bucket       bucket // the Store's query cost bucket, as far as the client knows it
+	quotas       quotas // each Caller's Quota of the Store's bucket
 
 	mu     sync.Mutex // held while a token is fetched, so only one runs at a time
 	token  string
@@ -60,8 +61,14 @@ type Client struct {
 }
 
 // New returns a Client for the Store at baseURL ("https://<name>.myshopify.com").
-// If hc is nil, http.DefaultClient is used. Warnings go to logger.
-func New(baseURL, clientID, clientSecret string, hc *http.Client, logger *slog.Logger) *Client {
+// quotaShare is the share of the Store's rate limit each Caller's Quota
+// gets; it must be above 0 and at most 1. If hc is nil,
+// http.DefaultClient is used. Warnings go to logger.
+func New(baseURL, clientID, clientSecret string, quotaShare float64, hc *http.Client, logger *slog.Logger) (*Client, error) {
+	// Written this way round, NaN is refused too.
+	if !(quotaShare > 0 && quotaShare <= 1) {
+		return nil, fmt.Errorf("the Quota share must be above 0 and at most 1, got %v", quotaShare)
+	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}
@@ -72,7 +79,8 @@ func New(baseURL, clientID, clientSecret string, hc *http.Client, logger *slog.L
 		hc:           hc,
 		logger:       logger,
 		clock:        realClock{},
-	}
+		quotas:       quotas{share: quotaShare},
+	}, nil
 }
 
 // ThrottleStatus is the state of the Store's query cost bucket.
@@ -116,9 +124,12 @@ func report(ctx context.Context, resp *Meta) {
 // Query runs a GraphQL query and decodes its data into data. maxCost is the
 // most the query can cost, in Shopify's query cost points.
 //
-// It first waits for the Store's cost bucket to hold maxCost, or returns a
+// If ctx has a Quota key (WithQuotaKey), it first charges maxCost to that
+// Quota, or returns a *QuotaError at once if the Quota can't cover it. It
+// then waits for the Store's cost bucket to hold maxCost, or returns a
 // *ThrottledError at once if that wait would outlast ctx's deadline. If
-// Shopify throttles the query anyway, it is retried once the same way.
+// Shopify throttles the query anyway, it is retried once the same way, and
+// the retry is charged to the Quota too.
 // Shopify's errors come back as GraphQLErrors or UserErrors. The Meta,
 // when not nil, is from the last request Shopify answered, even if there is
 // an error.
@@ -151,8 +162,14 @@ func throttled(err error) bool {
 	return errors.As(err, &errs) && errs.has("THROTTLED")
 }
 
-// queryOnce waits for capacity, then sends one query and decodes the answer.
+// queryOnce charges the Caller's Quota and waits for the Store's capacity,
+// then sends one query and decodes the answer.
 func (c *Client) queryOnce(ctx context.Context, maxCost float64, body []byte, data any) (*Meta, error) {
+	// The Quota comes first, because it never waits: a Caller that has
+	// spent it doesn't queue for the Store's bucket.
+	if err := c.chargeQuota(ctx, maxCost); err != nil {
+		return nil, err
+	}
 	if err := c.waitForCapacity(ctx, maxCost); err != nil {
 		return nil, err
 	}
