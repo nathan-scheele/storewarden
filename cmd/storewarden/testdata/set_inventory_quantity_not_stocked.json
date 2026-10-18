@@ -1,0 +1,18 @@
+{
+  "data": {
+    "inventoryItem": {
+      "inventoryLevel": null
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 3,
+      "actualQueryCost": 2,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19998,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

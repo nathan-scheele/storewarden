@@ -85,3 +85,55 @@ func TestWriteToolIsListedDestructiveAndIdempotent(t *testing.T) {
 		t.Errorf("annotations = %+v, want destructive and idempotent, not read-only", a)
 	}
 }
+
+// mutations returns the GraphQL mutations the fake Store has received.
+func (s *fakeShopify) mutations() []graphQLRequest {
+	var found []graphQLRequest
+	for _, r := range s.requests() {
+		if strings.HasPrefix(r.Query, "mutation") {
+			found = append(found, r)
+		}
+	}
+	return found
+}
+
+func TestSetInventoryQuantityIsADryRunByDefault(t *testing.T) {
+	h := newWriteHarness(t, grantedTo(inventoryWriter))
+
+	got := callTool(t, h.connect(t), "set_inventory_quantity", map[string]any{
+		"inventory_item_id": testInventoryItem,
+		"location_id":       testLocation,
+		"quantity":          49,
+	})
+	recs := h.audit.records(t)
+	if len(recs) == 0 {
+		t.Fatal("no audit records")
+	}
+	want := map[string]any{
+		"dry_run":    true,
+		"current":    50.0, // as recorded
+		"new":        49.0,
+		"applied":    false,
+		"request_id": recs[0]["request_id"],
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("set_inventory_quantity =\n%v\nwant\n%v", got, want)
+	}
+	if m := h.store.mutations(); len(m) != 0 {
+		t.Errorf("Shopify received %d mutations in a dry run: %v", len(m), m)
+	}
+}
+
+func TestDryRunAtALocationThatDoesNotStockTheItemIsAToolError(t *testing.T) {
+	cs := newWriteHarness(t, grantedTo(inventoryWriter)).connect(t)
+
+	got := callToolError(t, cs, "set_inventory_quantity", map[string]any{
+		"inventory_item_id": testInventoryItem,
+		"location_id":       "gid://shopify/Location/1",
+		"quantity":          49,
+	})
+	want := "inventory item " + testInventoryItem + " isn't stocked at location gid://shopify/Location/1"
+	if got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+}
