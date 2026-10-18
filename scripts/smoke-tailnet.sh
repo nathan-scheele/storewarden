@@ -564,7 +564,7 @@ if [[ "$smoke_tailnet" != "$sw_tailnet" ]]; then
   note "Make its auth key in the same personal tailnet as storewarden's."
   exit 1
 fi
-record PASS "the test Caller joined the same tailnet as its own node"
+record PASS "the test Caller joined the same tailnet as storewarden"
 note "Logs: $SMOKE_LOG"
 pause
 
