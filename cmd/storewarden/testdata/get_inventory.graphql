@@ -6,7 +6,7 @@ query GetInventory($id: ID!) {
           id
           name
         }
-        quantities(names: ["available", "on_hand"]) {
+        quantities(names: ["available", "on_hand", "damaged", "quality_control", "safety_stock"]) {
           name
           quantity
         }

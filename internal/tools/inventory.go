@@ -20,7 +20,7 @@ const getInventoryQuery = `query GetInventory($id: ID!) {
           id
           name
         }
-        quantities(names: ["available", "on_hand"]) {
+        quantities(names: ["available", "on_hand", "damaged", "quality_control", "safety_stock"]) {
           name
           quantity
         }
@@ -41,10 +41,13 @@ type Inventory struct {
 
 // InventoryLevel is an inventory item's stock at one location.
 type InventoryLevel struct {
-	LocationID   string `json:"location_id"`
-	LocationName string `json:"location_name"`
-	Available    int    `json:"available" jsonschema:"units that can be sold"`
-	OnHand       int    `json:"on_hand" jsonschema:"units physically at the location, whether or not they can be sold"`
+	LocationID     string `json:"location_id"`
+	LocationName   string `json:"location_name"`
+	Available      int    `json:"available" jsonschema:"units that can be sold"`
+	OnHand         int    `json:"on_hand" jsonschema:"units physically at the location, whether or not they can be sold"`
+	Damaged        int    `json:"damaged" jsonschema:"units on hand that are damaged and can't be sold"`
+	QualityControl int    `json:"quality_control" jsonschema:"units on hand held back for quality control"`
+	SafetyStock    int    `json:"safety_stock" jsonschema:"units on hand held back as safety stock"`
 }
 
 // quantity is one of an inventory level's named quantities, as Shopify
@@ -95,11 +98,17 @@ func getInventory(client *shopify.Client) mcp.ToolHandlerFor[GetInventoryInput, 
 			// A quantity Shopify leaves out counts as 0.
 			available, _ := quantityNamed(level.Quantities, "available")
 			onHand, _ := quantityNamed(level.Quantities, "on_hand")
+			damaged, _ := quantityNamed(level.Quantities, "damaged")
+			qualityControl, _ := quantityNamed(level.Quantities, "quality_control")
+			safetyStock, _ := quantityNamed(level.Quantities, "safety_stock")
 			out.Levels = append(out.Levels, InventoryLevel{
-				LocationID:   level.Location.ID,
-				LocationName: level.Location.Name,
-				Available:    available,
-				OnHand:       onHand,
+				LocationID:     level.Location.ID,
+				LocationName:   level.Location.Name,
+				Available:      available,
+				OnHand:         onHand,
+				Damaged:        damaged,
+				QualityControl: qualityControl,
+				SafetyStock:    safetyStock,
 			})
 		}
 		return nil, out, nil

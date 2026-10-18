@@ -122,7 +122,7 @@ All Tools use fixed GraphQL documents against Admin API **2026-10**, pinned as a
 | `get_shop` | Read | `shop` | none |
 | `search_products` | Read | `products(query:, first:, after:)` | `read_products` |
 | `get_product` | Read | `product(id:)` + variants (first 100) | `read_products` |
-| `get_inventory` | Read | `inventoryItem(id:).inventoryLevels` with `quantities(names: ["available","on_hand"])` | `read_inventory`, `read_locations` |
+| `get_inventory` | Read | `inventoryItem(id:).inventoryLevels` with `quantities(names: ["available","on_hand","damaged","quality_control","safety_stock"])` | `read_inventory`, `read_locations` |
 | `set_inventory_quantity` | Write | `inventorySetQuantities @idempotent` | `write_inventory` |
 
 **Inputs and outputs** (Go structs, schema inferred by the SDK):
@@ -130,7 +130,7 @@ All Tools use fixed GraphQL documents against Admin API **2026-10**, pinned as a
 - `get_shop` → name, myshopify domain, plan, currency, and the current throttle status.
 - `search_products` (`query` string in Shopify search syntax; `first` 1–50, default 10; optional `after` cursor) → `products[{id, title, handle, status, total_inventory}]`, `next_cursor`.
 - `get_product` (`id` as a product GID) → id, title, handle, status, tags, `variants[{id, title, sku, inventory_item_id}]`. Each variant's `title` and `sku` are there so a Caller can tell variants apart before it reads their inventory.
-- `get_inventory` (`inventory_item_id`) → `levels[{location_id, location_name, available, on_hand}]`.
+- `get_inventory` (`inventory_item_id`) → `levels[{location_id, location_name, available, on_hand, damaged, quality_control, safety_stock}]`.
 - `set_inventory_quantity`. Input: `inventory_item_id`, `location_id`, `quantity` (≥ 0), and these three:
   - `dry_run`: default **true**.
   - `idempotency_key`: required when `dry_run` is false; 1–255 characters, UUID recommended.
