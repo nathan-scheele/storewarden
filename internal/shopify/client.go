@@ -88,6 +88,16 @@ type Response struct {
 	RequestID string // Shopify's X-Request-Id
 }
 
+type observerKey struct{}
+
+// WithObserver returns a copy of ctx in which every Query that gets a
+// response from Shopify passes it to observe, the way net/http/httptrace
+// reports on requests. It lets the Audit record collect each call's costs
+// and request IDs without every Tool passing them along.
+func WithObserver(ctx context.Context, observe func(*Response)) context.Context {
+	return context.WithValue(ctx, observerKey{}, observe)
+}
+
 // Query runs a GraphQL query and decodes its data into data.
 //
 // It first waits for the Store's cost bucket to hold enough for the query,
@@ -97,6 +107,14 @@ type Response struct {
 // Response, when not nil, is from the last request Shopify answered, even
 // if there is an error.
 func (c *Client) Query(ctx context.Context, query string, variables map[string]any, data any) (*Response, error) {
+	resp, err := c.query(ctx, query, variables, data)
+	if observe, ok := ctx.Value(observerKey{}).(func(*Response)); ok && resp != nil {
+		observe(resp)
+	}
+	return resp, err
+}
+
+func (c *Client) query(ctx context.Context, query string, variables map[string]any, data any) (*Response, error) {
 	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err

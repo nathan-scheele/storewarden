@@ -19,6 +19,7 @@ import (
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tailcfg"
 
+	"github.com/nathan-scheele/storewarden/internal/audit"
 	"github.com/nathan-scheele/storewarden/internal/authz"
 	"github.com/nathan-scheele/storewarden/internal/shopify"
 )
@@ -28,6 +29,8 @@ const (
 	testClientID     = "test-client-id"
 	testClientSecret = "test-secret-LEAKMARKER"
 	testToken        = "shpat_test-token-LEAKMARKER"
+
+	testShopifyRequestID = "shopify-request-0001"
 )
 
 // fakeWhoIs answers every WhoIs call the same way. A func type with a
@@ -58,14 +61,21 @@ func grantedTo(values ...string) fakeWhoIs {
 	}
 }
 
-// fakeShopify serves the client credentials grant and answers every GraphQL
-// query with the response recorded in testdata.
-func fakeShopify(t *testing.T) *httptest.Server {
+// shopifyFake serves the client credentials grant and answers every GraphQL
+// query with the response recorded in testdata, and counts the queries.
+type shopifyFake struct {
+	mu      sync.Mutex
+	body    []byte
+	queries int
+}
+
+func newShopifyFake(t *testing.T) (*shopifyFake, *httptest.Server) {
 	t.Helper()
 	recorded, err := os.ReadFile("testdata/shop.json")
 	if err != nil {
 		t.Fatal(err)
 	}
+	fake := &shopifyFake{body: recorded}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /admin/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
 		if r.PostFormValue("grant_type") != "client_credentials" ||
@@ -86,12 +96,32 @@ func fakeShopify(t *testing.T) *httptest.Server {
 			http.Error(w, "bad token", http.StatusUnauthorized)
 			return
 		}
+		fake.mu.Lock()
+		fake.queries++
+		body := fake.body
+		fake.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(recorded)
+		w.Header().Set("X-Request-Id", testShopifyRequestID)
+		w.Write(body)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv
+	return fake, srv
+}
+
+// replaceInBody changes the recorded response before it is served, so a test
+// can plant a recognisable value in it.
+func (f *shopifyFake) replaceInBody(old, new string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.body = bytes.ReplaceAll(f.body, []byte(old), []byte(new))
+}
+
+// queryCount is how many GraphQL queries Shopify has received.
+func (f *shopifyFake) queryCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.queries
 }
 
 // syncBuffer is a bytes.Buffer that is safe to write from server goroutines.
@@ -113,20 +143,25 @@ func (b *syncBuffer) String() string {
 }
 
 type harness struct {
-	url  string
-	logs *syncBuffer
+	url     string
+	logs    *syncBuffer
+	audit   *auditSink
+	shopify *shopifyFake
 }
 
 // newHarness starts the assembled server handler with the given WhoIs, a
-// fake Shopify and debug-level JSON logs captured in memory.
+// fake Shopify, an in-memory audit sink and debug-level JSON logs captured
+// in memory.
 func newHarness(t *testing.T, whois authz.WhoIser) *harness {
 	t.Helper()
 	logs := &syncBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	client := shopify.New(fakeShopify(t).URL, testClientID, testClientSecret, nil)
-	srv := httptest.NewServer(newHandler(whois, client, logger))
+	fake, shopifySrv := newShopifyFake(t)
+	client := shopify.New(shopifySrv.URL, testClientID, testClientSecret, nil)
+	sink := &auditSink{}
+	srv := httptest.NewServer(newHandler(whois, client, audit.New(sink, logger), logger))
 	t.Cleanup(srv.Close)
-	return &harness{url: srv.URL, logs: logs}
+	return &harness{url: srv.URL, logs: logs, audit: sink, shopify: fake}
 }
 
 func (h *harness) connect(t *testing.T) *mcp.ClientSession {
