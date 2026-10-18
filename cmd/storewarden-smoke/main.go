@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/tsnet"
 )
 
@@ -39,6 +40,11 @@ func run() error {
 	flag.Parse()
 	if *target == "" {
 		return errors.New("--target is required")
+	}
+	// Built in, tsnet's peer API listens on every host interface
+	// (docs/adr/0003-build-without-the-peer-api-server.md).
+	if buildfeatures.HasPeerAPIServer {
+		return errors.New("storewarden-smoke must be built with -tags ts_omit_peerapiserver")
 	}
 
 	dir, err := os.MkdirTemp("", "storewarden-smoke-")
