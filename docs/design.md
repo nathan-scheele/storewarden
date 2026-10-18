@@ -82,6 +82,9 @@ Names and tags are recorded for the audit trail only and never used to authorize
 `ip` grants network reach to port 80. `app` grants the Tools.
 
 ```hujson
+"groups": {
+  "group:inventory": ["alice@example.com"],
+},
 "tagOwners": {
   "tag:storewarden": ["autogroup:admin"],
   "tag:agent":       ["autogroup:admin"],
