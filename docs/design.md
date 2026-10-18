@@ -4,7 +4,7 @@ storewarden is a single Go binary. It joins a tailnet with `tsnet` and serves a 
 
 ## Goals
 
-- Agents on the tailnet can read the Store and correct inventory, and nothing else.
+- Callers on the tailnet can read the Store and correct inventory, and nothing else.
 - Authorization lives in the tailnet policy file, not in storewarden's config.
 - Write tools are off by default, dry run by default, idempotent and compare-and-swap.
 - Every attempted Tool call leaves an Audit record.
@@ -61,7 +61,7 @@ Stateless mode means WhoIs and authorization run on every POST, not once per ses
 **Caller** comes from `local.Client.WhoIs(ctx, r.RemoteAddr)`:
 
 - Always: `Node.StableID`, `Node.Name`.
-- Tagged (`Node.IsTagged()`): `Node.Tags`, and user is recorded as `"tagged"`. Tagged nodes are allowed; they are the main case for agents.
+- Tagged (`Node.IsTagged()`): `Node.Tags`, and user is recorded as `"tagged"`. Tagged nodes are allowed; they are the main case for software Callers.
 - Untagged: `UserProfile.LoginName`.
 
 Names and tags are recorded for the audit trail only and never used to authorize.
@@ -225,7 +225,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 | Threat | Mitigation |
 |---|---|
 | Ungranted tailnet peer | WhoIs on every request; no capability → 403; Tools hidden and denied |
-| Granted but prompt-injected agent | Fixed Tools only (no raw query), Read tools by default, Write mode off, dry run by default, compare-and-swap, small grant sets |
+| Granted but prompt-injected Caller | Fixed Tools only (no raw query), Read tools by default, Write mode off, dry run by default, compare-and-swap, small grant sets |
 | Retried or duplicated write | Shopify-enforced Idempotency key |
 | Stale read leading to a wrong write | Expected quantity → `changeFromQuantity` |
 | Session reused by another peer | Stateless MCP (ADR 0001) |

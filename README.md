@@ -6,7 +6,7 @@ storewarden is an independent project. It is not made or supported by Tailscale 
 
 What it does:
 
-- **Identity from the tailnet.** Every request is identified with Tailscale WhoIs. Agents need no Shopify credentials of their own.
+- **Identity from the tailnet.** Every request is identified with Tailscale WhoIs. Callers need no Shopify credentials of their own.
 - **Access from the policy file.** You grant Tools by exact name, in the same file as the rest of your tailnet access rules.
 - **Guarded writes.** The one Write tool doesn't exist unless the operator turns on Write mode. Every call is a Dry run unless the Caller opts out. A real write needs an Idempotency key and an Expected quantity, and Shopify enforces both.
 - **An Audit record for every attempted call.** A call that can't be audited doesn't happen.
@@ -199,7 +199,7 @@ How storewarden reads the Grants:
 - **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. The rest of the Grant still applies.
 - **Write mode wins.** `set_inventory_quantity` is allowed only when storewarden runs with `--allow-writes`. A Grant that names it is still valid while Write mode is off; it just allows nothing until Write mode is on, and it logs no warning.
 
-Tagged devices are full Callers. They are the usual way to run headless agents. A tagged device has no user, so `group:inventory` matches only the untagged devices of its members.
+Tagged devices are full Callers. They are the usual way to run headless Callers, such as agents on servers. A tagged device has no user, so `group:inventory` matches only the untagged devices of its members.
 
 Policy changes reach storewarden within seconds of saving them, with no restart, because it checks every request with WhoIs.
 
@@ -363,7 +363,7 @@ The root of trust is the tailnet policy file. Anyone who can edit it can grant t
 |---|---|
 | A tailnet device with no Grant | WhoIs on every request. No storewarden capability means HTTP 403 before any MCP exchange, and a denial Audit record. |
 | A granted Caller calls a Tool it isn't granted | `tools/list` hides it. `tools/call` answers exactly as for a Tool that doesn't exist, and writes a denial Audit record. |
-| A granted agent is manipulated through its inputs (prompt injection) | Fixed Tools only, with no raw queries. Write mode off by default. Dry run by default. Compare-and-swap on every write. Keep Grants small. |
+| A granted Caller is manipulated through its inputs (prompt injection) | Fixed Tools only, with no raw queries. Write mode off by default. Dry run by default. Compare-and-swap on every write. Keep Grants small. |
 | A write is retried or duplicated | The Idempotency key goes to Shopify's `@idempotent` directive, and compare-and-swap stops a second change. See [What retries really do](#what-retries-really-do). |
 | A stale read leads to a wrong write | `expected_quantity` becomes Shopify's `changeFromQuantity`, which is never null. |
 | Another device reuses a Caller's MCP session | Stateless MCP. Every request is identified on its own ([ADR 0001](docs/adr/0001-stateless-mcp-for-per-request-identity.md)). |
