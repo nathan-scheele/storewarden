@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -117,16 +118,24 @@ type StateChange struct {
 // movableStates are the Inventory states a move can name. Reserved and
 // committed stock is held for orders, incoming stock isn't at the location
 // yet, and on hand is the sum of the others, so none of them is here.
+// getMovableQuantitiesQuery, the Tool's description, the from and to
+// schema tags and getInventoryQuery list them too, as fixed text; change
+// them together.
 var movableStates = []string{"available", "damaged", "quality_control", "safety_stock"}
+
+// movableStatesText is movableStates as an error names them:
+// "available, damaged, quality_control or safety_stock".
+var movableStatesText = strings.Join(movableStates[:len(movableStates)-1], ", ") + " or " + movableStates[len(movableStates)-1]
 
 // checkMove returns an error unless a move from one Inventory state to
 // another is allowed: both are movable states, they differ, and exactly one
 // of them is available.
 func checkMove(from, to string) error {
-	for _, s := range []struct{ field, state string }{{"from", from}, {"to", to}} {
-		if !slices.Contains(movableStates, s.state) {
-			return fmt.Errorf("%s must be available, damaged, quality_control or safety_stock, not %q", s.field, s.state)
-		}
+	if !slices.Contains(movableStates, from) {
+		return fmt.Errorf("from must be %s, not %q", movableStatesText, from)
+	}
+	if !slices.Contains(movableStates, to) {
+		return fmt.Errorf("to must be %s, not %q", movableStatesText, to)
 	}
 	if from == to {
 		return fmt.Errorf("from and to are both %s: a move needs two different states", from)
