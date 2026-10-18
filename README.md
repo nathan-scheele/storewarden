@@ -330,6 +330,7 @@ Shopify's refusals come back as plain Tool errors:
 - **Stale quantity** (`CHANGE_FROM_QUANTITY_STALE`): the available quantity is no longer `expected_quantity`. Nothing changed. Run a new Dry run and use its `current` as `expected_quantity`, with a new key.
 - **Key reused with different input** (`IDEMPOTENCY_KEY_PARAMETER_MISMATCH`): nothing changed. Use a new key for each new change.
 - **Concurrent request** (`IDEMPOTENCY_CONCURRENT_REQUEST`): a call with this key is still in progress. The error starts with `retryable: ` and ends `Retry the same call in 2s`, like a rate-limited call. Retry exactly the same call, with the same key, after that wait.
+- **Previous attempt failed** (`IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED`): an earlier call with this key failed, and Shopify won't use the key again. Nothing changed. Run a new Dry run and use a new key.
 
 #### What retries really do
 

@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 
@@ -244,7 +243,7 @@ func moveQuantity(ctx context.Context, client *shopify.Client, in MoveInventoryQ
 	// As for set_inventory_quantity, no error means the move was made.
 	var data struct{}
 	_, err := client.Query(ctx, moveQuantityMutation, moveQuantityMaxCost, variables, &data)
-	return plainMoveError(err)
+	return plainWriteError(err, staleMoveQuantities)
 }
 
 // staleMoveQuantities is move_inventory_quantity's wording for Shopify's
@@ -252,22 +251,3 @@ func moveQuantity(ctx context.Context, client *shopify.Client, in MoveInventoryQ
 const staleMoveQuantities = "a quantity changed since you read it: expected_from_quantity or expected_to_quantity is no longer current. " +
 	"Nothing was changed. Run a dry run to see the current quantities, then move with those as expected_from_quantity and expected_to_quantity and a new idempotency_key. " +
 	"If you were retrying a move, the dry run also shows whether the earlier call already made it"
-
-// previousAttemptFailed is the wording for Shopify's
-// IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED, which only the move Tool translates.
-const previousAttemptFailed = "an earlier call with this idempotency_key failed, so Shopify won't use the key again. " +
-	"Nothing was changed. Run a dry run again, then make the move with a new idempotency_key"
-
-// plainMoveError is plainWriteError for a move, which also translates
-// IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED.
-func plainMoveError(err error) error {
-	var userErrs shopify.UserErrors
-	if errors.As(err, &userErrs) {
-		for _, ue := range userErrs {
-			if ue.Code == "IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED" {
-				return errors.New(previousAttemptFailed)
-			}
-		}
-	}
-	return plainWriteError(err, staleMoveQuantities)
-}
