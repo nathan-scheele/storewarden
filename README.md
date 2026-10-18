@@ -6,7 +6,7 @@ storewarden is an independent project. It is not made or supported by Tailscale 
 
 What it does:
 
-- **Identity from the tailnet.** Every request is identified with Tailscale WhoIs. Agents need no Shopify credentials of their own.
+- **Identity from the tailnet.** Every request is identified with Tailscale WhoIs. Callers need no Shopify credentials of their own.
 - **Access from the policy file.** You grant Tools by exact name, in the same file as the rest of your tailnet access rules.
 - **Guarded writes.** The one Write tool doesn't exist unless the operator turns on Write mode. Every call is a Dry run unless the Caller opts out. A real write needs an Idempotency key and an Expected quantity, and Shopify enforces both.
 - **An Audit record for every attempted call.** A call that can't be audited doesn't happen.
@@ -196,10 +196,10 @@ How storewarden reads the Grants:
 - **Union.** When several Grants match a Caller, the Caller gets every Tool any of them names. A Grant can only add Tools, never take them away. For example, if you add a third Grant that gives `group:inventory` the Read tools, Alice's devices can use all five Tools.
 - **No capability, no access.** A device with network access but no storewarden capability gets HTTP 403 before any MCP exchange.
 - **Typos deny.** A Grant value with an unknown field, such as `"tool"` instead of `"tools"`, denies the Caller and logs an error. A typo can't silently grant nothing.
-- **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. The rest of the Grant still applies.
+- **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. `set_inventory_quantity` is a Tool storewarden has even while Write mode is off, so naming it never warns. The rest of the Grant still applies.
 - **Write mode wins.** `set_inventory_quantity` is allowed only when storewarden runs with `--allow-writes`. A Grant that names it is still valid while Write mode is off; it just allows nothing until Write mode is on, and it logs no warning.
 
-Tagged devices are full Callers. They are the usual way to run headless agents. A tagged device has no user, so `group:inventory` matches only the untagged devices of its members.
+Tagged devices are full Callers. They are the usual way to run headless Callers, such as agents on servers. A tagged device has no user, so `group:inventory` matches only the untagged devices of its members.
 
 Policy changes reach storewarden within seconds of saving them, with no restart, because it checks every request with WhoIs.
 
@@ -325,7 +325,7 @@ Shopify's refusals come back as plain Tool errors:
 
 - **Stale quantity** (`CHANGE_FROM_QUANTITY_STALE`): the available quantity is no longer `expected_quantity`. Nothing changed. Run a new Dry run and use its `current` as `expected_quantity`, with a new key.
 - **Key reused with different input** (`IDEMPOTENCY_KEY_PARAMETER_MISMATCH`): nothing changed. Use a new key for each new change.
-- **Concurrent request** (`IDEMPOTENCY_CONCURRENT_REQUEST`): a call with this key is still in progress. The error starts with `retryable: `. Retry exactly the same call with the same key after a few seconds.
+- **Concurrent request** (`IDEMPOTENCY_CONCURRENT_REQUEST`): a call with this key is still in progress. The error starts with `retryable: ` and ends `Retry the same call in 2s`, like a rate-limited call. Retry exactly the same call, with the same key, after that wait.
 
 #### What retries really do
 
@@ -343,7 +343,7 @@ So if you retry a change that may already have gone through, expect either the o
 
 Shopify limits each store with a bucket of query cost points. storewarden keeps one bucket per store and updates it from every response. It never hardcodes the limits.
 
-Before each query, storewarden waits until the bucket should hold enough points for it. If the request has a deadline that the wait would pass, it fails at once with a rate-limit error that says how long to wait. storewarden sets no deadline of its own, so today a call waits. If the Caller disconnects, the wait ends. If Shopify still throttles a query, storewarden waits and retries it once. A second throttle becomes a Tool error: `shopify: rate limited; retry in <wait>`.
+Before each query, storewarden waits until the bucket should hold the most that query can cost. Each Tool's maximum cost is fixed and checked against a recording; `search_products` always counts its cost at the largest page size. Every Tool call has a 30-second deadline. If the wait would pass it, the call fails at once with a Tool error that starts with `retryable: ` and ends with how long to wait: `Retry the same call in <wait>`. If the Caller disconnects, the wait ends. If Shopify still throttles a query, storewarden waits and retries it once. A second throttle becomes the same retryable error.
 
 ## Threat model
 
@@ -363,14 +363,14 @@ The root of trust is the tailnet policy file. Anyone who can edit it can grant t
 |---|---|
 | A tailnet device with no Grant | WhoIs on every request. No storewarden capability means HTTP 403 before any MCP exchange, and a denial Audit record. |
 | A granted Caller calls a Tool it isn't granted | `tools/list` hides it. `tools/call` answers exactly as for a Tool that doesn't exist, and writes a denial Audit record. |
-| A granted agent is manipulated through its inputs (prompt injection) | Fixed Tools only, with no raw queries. Write mode off by default. Dry run by default. Compare-and-swap on every write. Keep Grants small. |
+| A granted Caller is manipulated through its inputs (prompt injection) | Fixed Tools only, with no raw queries. Write mode off by default. Dry run by default. Compare-and-swap on every write. Keep Grants small. |
 | A write is retried or duplicated | The Idempotency key goes to Shopify's `@idempotent` directive, and compare-and-swap stops a second change. See [What retries really do](#what-retries-really-do). |
 | A stale read leads to a wrong write | `expected_quantity` becomes Shopify's `changeFromQuantity`, which is never null. |
 | Another device reuses a Caller's MCP session | Stateless MCP. Every request is identified on its own ([ADR 0001](docs/adr/0001-stateless-mcp-for-per-request-identity.md)). |
 | Public exposure | The only listener is tsnet's, inside the tailnet. No Funnel, serve config or host listener in the code, and `make never-public` fails the build if one appears. tsnet clears any saved serve config when the node starts. storewarden is built without tsnet's peer API server, which would otherwise listen on every host interface, and refuses to start if it isn't ([ADR 0003](docs/adr/0003-build-without-the-peer-api-server.md)). |
 | Credential leak | Secrets come only from the environment and are never logged or written to Audit records. The access token is kept only in memory. The app has no customer or order scopes. |
 | An action that isn't audited | Audit records fail closed: a call whose attempt record can't be written is refused. |
-| Customer data in the audit trail | Shopify response bodies are never written to Audit records. |
+| Customer data in the audit trail | Shopify response bodies, and the messages in Shopify's errors, are never written to Audit records. Errors are recorded by their codes. |
 
 ### Accepted risks
 
@@ -419,13 +419,13 @@ Audit records are JSON Lines, one record per line. They go to stdout by default,
 | `dry_run` | For the Write tool, whether the call was a Dry run. `false` for Read tools. |
 | `idempotency_key` | For the Write tool, the Idempotency key, if any. |
 | `outcome` | On a `result` record, `ok` or `error`. |
-| `error` | The error the Caller got, if any. |
-| `shopify.requested_cost` | Shopify's estimated query cost, summed over the call's queries. |
-| `shopify.actual_cost` | Shopify's actual query cost, summed the same way. |
-| `shopify.request_id` | Shopify's `X-Request-Id` for the call's last query. |
+| `error` | The error the Caller got, if any. A Shopify error is recorded by its codes only, such as `shopify: user errors, codes: INVALID_LOCATION`, because its message can quote Store data; the Caller still gets the message. |
+| `shopify.requested_cost` | Shopify's estimated query cost, summed over every request the call sent, including a throttled request and its retry. |
+| `shopify.actual_cost` | Shopify's actual query cost, summed the same way. A throttled request costs nothing. |
+| `shopify.request_id` | Shopify's `X-Request-Id` for the call's last request. |
 | `duration_ms` | On a `result` record, how long the call took. |
 
-The `shopify` object appears only once Shopify has answered. Shopify response bodies and credentials are never recorded. Arguments are recorded as sent, so Callers shouldn't put secrets in them.
+The `shopify` object appears only once Shopify has answered. Shopify response bodies, Shopify error messages and credentials are never recorded. Arguments are recorded as sent, so Callers shouldn't put secrets in them.
 
 Names and tags are recorded for the audit trail only. storewarden never uses them to authorize.
 

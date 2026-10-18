@@ -1,10 +1,12 @@
 package shopify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,6 +19,10 @@ import (
 const (
 	testClientID     = "test-client-id"
 	testClientSecret = "test-client-secret"
+
+	// testQueryCost is the most the tests' queries can cost. costBody and
+	// throttledBody report it as the requested cost.
+	testQueryCost = 100
 )
 
 // fakeClock is a clock that only moves when told to. After moves it forward
@@ -68,15 +74,16 @@ func (f *fakeClock) Waits() []time.Duration {
 type fakeShopify struct {
 	*httptest.Server
 
-	mu      sync.Mutex
-	issued  int
-	tokens  []string // token sent with each GraphQL request, in order
-	graphql func(w http.ResponseWriter, token string, call int)
+	mu        sync.Mutex
+	expiresIn any // expires_in sent with each token; nil leaves it out
+	issued    int
+	tokens    []string // token sent with each GraphQL request, in order
+	graphql   func(w http.ResponseWriter, token string, call int)
 }
 
 func newFakeShopify(t *testing.T, graphql func(w http.ResponseWriter, token string, call int)) *fakeShopify {
 	t.Helper()
-	f := &fakeShopify{graphql: graphql}
+	f := &fakeShopify{graphql: graphql, expiresIn: 86399}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /admin/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("grant_type") != "client_credentials" ||
@@ -86,10 +93,13 @@ func newFakeShopify(t *testing.T, graphql func(w http.ResponseWriter, token stri
 		}
 		f.mu.Lock()
 		f.issued++
-		token := fmt.Sprintf("token-%d", f.issued)
+		resp := map[string]any{"access_token": fmt.Sprintf("token-%d", f.issued)}
+		if f.expiresIn != nil {
+			resp["expires_in"] = f.expiresIn
+		}
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"access_token": token, "expires_in": 86399})
+		json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("POST /admin/api/"+APIVersion+"/graphql.json", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-Shopify-Access-Token")
@@ -132,8 +142,11 @@ func answer(body string) func(http.ResponseWriter, string, int) {
 	return func(w http.ResponseWriter, _ string, _ int) { fmt.Fprint(w, body) }
 }
 
+// discard is a logger for tests that don't look at the logs.
+var discard = slog.New(slog.DiscardHandler)
+
 func newTestClient(f *fakeShopify, clock *fakeClock) *Client {
-	c := New(f.URL, testClientID, testClientSecret, nil)
+	c := New(f.URL, testClientID, testClientSecret, nil, discard)
 	c.clock = clock
 	return c
 }
@@ -144,13 +157,13 @@ type shopData struct {
 	} `json:"shop"`
 }
 
-func query(t *testing.T, c *Client) (*Response, error) {
+func query(t *testing.T, c *Client) (*Meta, error) {
 	t.Helper()
 	var data shopData
-	return c.Query(t.Context(), "query { shop { name } }", nil, &data)
+	return c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data)
 }
 
-func mustQuery(t *testing.T, c *Client) *Response {
+func mustQuery(t *testing.T, c *Client) *Meta {
 	t.Helper()
 	resp, err := query(t, c)
 	if err != nil {
@@ -193,6 +206,40 @@ func TestTokenIsReissuedFiveMinutesBeforeExpiry(t *testing.T) {
 	}
 }
 
+// Without a usable expires_in, a token is kept for 24 hours rather than
+// reissued for every query, and a warning without the token is logged.
+func TestTokenWithoutExpiryIsKeptFor24Hours(t *testing.T) {
+	for name, expiresIn := range map[string]any{"missing": nil, "zero": 0} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeShopify(t, answer(shopBody))
+			f.mu.Lock()
+			f.expiresIn = expiresIn
+			f.mu.Unlock()
+			clock := newFakeClock()
+			var logs bytes.Buffer
+			c := New(f.URL, testClientID, testClientSecret, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+			c.clock = clock
+
+			mustQuery(t, c)
+			clock.Advance(24*time.Hour - 5*time.Minute - time.Second)
+			mustQuery(t, c)
+			clock.Advance(2 * time.Second)
+			mustQuery(t, c)
+
+			want := []string{"token-1", "token-1", "token-2"}
+			if got := f.Tokens(); fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("tokens sent = %v, want %v", got, want)
+			}
+			if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "expires_in") {
+				t.Errorf("no warning about expires_in logged; logs:\n%s", logs.String())
+			}
+			if strings.Contains(logs.String(), "token-1") {
+				t.Errorf("logs contain the token:\n%s", logs.String())
+			}
+		})
+	}
+}
+
 // refusing answers 401 to any request carrying one of the refused tokens.
 func refusing(refused ...string) func(http.ResponseWriter, string, int) {
 	return func(w http.ResponseWriter, token string, _ int) {
@@ -211,7 +258,7 @@ func TestTokenIsReissuedOnceAfter401AndTheRequestRetried(t *testing.T) {
 	c := newTestClient(f, newFakeClock())
 
 	var data shopData
-	if _, err := c.Query(t.Context(), "query { shop { name } }", nil, &data); err != nil {
+	if _, err := c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data); err != nil {
 		t.Fatal(err)
 	}
 	if data.Shop.Name != "storewarden-dev" {
@@ -246,7 +293,7 @@ func concurrently(t *testing.T, c *Client, n int) {
 	for range n {
 		wg.Go(func() {
 			var data shopData
-			_, err := c.Query(t.Context(), "query { shop { name } }", nil, &data)
+			_, err := c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data)
 			errs <- err
 		})
 	}
@@ -303,7 +350,7 @@ func TestUserErrorsAreTypedAndTheDataStillDecoded(t *testing.T) {
 			UserErrors []UserError `json:"userErrors"`
 		} `json:"inventorySetQuantities"`
 	}
-	_, err := c.Query(t.Context(), "mutation { inventorySetQuantities { userErrors { field message code } } }", nil, &data)
+	_, err := c.Query(t.Context(), "mutation { inventorySetQuantities { userErrors { field message code } } }", testQueryCost, nil, &data)
 	var got UserErrors
 	if !errors.As(err, &got) {
 		t.Fatalf("error = %v (%T), want UserErrors", err, err)
@@ -326,7 +373,7 @@ func TestEmptyUserErrorsAreNotAnError(t *testing.T) {
 	c := newTestClient(f, newFakeClock())
 
 	var data map[string]any
-	if _, err := c.Query(t.Context(), "mutation { x }", nil, &data); err != nil {
+	if _, err := c.Query(t.Context(), "mutation { x }", testQueryCost, nil, &data); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -393,7 +440,7 @@ func queryBy(t *testing.T, c *Client, deadline time.Duration) error {
 	ctx, cancel := context.WithTimeout(t.Context(), deadline)
 	defer cancel()
 	var data shopData
-	_, err := c.Query(ctx, "query { shop { name } }", nil, &data)
+	_, err := c.Query(ctx, "query { shop { name } }", testQueryCost, nil, &data)
 	return err
 }
 
@@ -426,6 +473,24 @@ func TestWaitsWhenCapacityRefillsBeforeTheDeadline(t *testing.T) {
 	}
 	if got := len(f.Tokens()); got != 2 {
 		t.Errorf("GraphQL requests = %d, want 2", got)
+	}
+}
+
+func TestWaitsForAQueryTheBucketHasNotSeenBefore(t *testing.T) {
+	// One query leaves 25 points. A different query, never sent before,
+	// can cost up to 100, so it waits 1.5s for the bucket to refill.
+	f := newFakeShopify(t, answer(costBody(25)))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+	mustQuery(t, c)
+
+	var data shopData
+	if _, err := c.Query(t.Context(), "query { shop { id } }", 100, nil, &data); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := clock.Waits(), []time.Duration{1500 * time.Millisecond}; !reflect.DeepEqual(got, want) {
+		t.Errorf("waits = %v, want %v", got, want)
 	}
 }
 
@@ -487,7 +552,7 @@ func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
 	c := newTestClient(f, clock)
 
 	var data shopData
-	resp, err := c.Query(t.Context(), "query { shop { name } }", nil, &data)
+	resp, err := c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,6 +565,33 @@ func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
 	}
 	if got := len(f.Tokens()); got != 2 {
 		t.Errorf("GraphQL requests = %d, want 2", got)
+	}
+}
+
+// A throttled query and its retry are both reported to the observer, so the
+// Audit record counts what both cost.
+func TestTheObserverSeesTheThrottledResponseAndTheRetry(t *testing.T) {
+	f := newFakeShopify(t, answers(throttledBody(25), costBody(0)))
+	c := newTestClient(f, newFakeClock())
+	var seen []Meta
+	ctx := WithObserver(t.Context(), func(resp *Meta) { seen = append(seen, *resp) })
+
+	var data shopData
+	if _, err := c.Query(ctx, "query { shop { name } }", testQueryCost, nil, &data); err != nil {
+		t.Fatal(err)
+	}
+
+	var ids []string
+	var requested float64
+	for _, resp := range seen {
+		ids = append(ids, resp.RequestID)
+		requested += resp.Cost.RequestedQueryCost
+	}
+	if want := []string{"request-1", "request-2"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("observed request IDs = %v, want %v", ids, want)
+	}
+	if requested != 200 {
+		t.Errorf("observed requested cost = %v, want 200 (100 for each request)", requested)
 	}
 }
 
@@ -570,7 +662,7 @@ func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
 
 	t.Run("token request refused", func(t *testing.T) {
 		f := newFakeShopify(t, answer(shopBody))
-		c := New(f.URL, testClientID, "wrong-secret", nil)
+		c := New(f.URL, testClientID, "wrong-secret", nil, discard)
 		_, err := query(t, c)
 		if err == nil || strings.Contains(err.Error(), "wrong-secret") {
 			t.Errorf("error = %v, want one without the secret", err)
@@ -579,7 +671,7 @@ func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
 
 	t.Run("Shopify unreachable", func(t *testing.T) {
 		f := newFakeShopify(t, answer(shopBody))
-		c := New(f.URL, testClientID, testClientSecret, nil)
+		c := New(f.URL, testClientID, testClientSecret, nil, discard)
 		f.Close()
 		_, err := query(t, c)
 		if err == nil || strings.Contains(err.Error(), testClientSecret) {

@@ -48,7 +48,7 @@ func Audited(log *audit.Log) mcp.Middleware {
 				// DryRun and IdempotencyKey stay empty for Read tools,
 				// which have neither.
 			}
-			if params.Name == setInventoryQuantityName {
+			if isWriteTool(params.Name) {
 				rec.DryRun, rec.IdempotencyKey = writeArgs(params.Arguments)
 			}
 			if err := log.Write(rec); err != nil {
@@ -78,33 +78,49 @@ func Audited(log *audit.Log) mcp.Middleware {
 // arguments haven't been validated yet; if they can't be read, the call is
 // taken as a Dry run, which is what the Tool will treat it as or refuse.
 func writeArgs(args json.RawMessage) (dryRun bool, idempotencyKey string) {
-	var in struct {
-		DryRun         *bool  `json:"dry_run"`
-		IdempotencyKey string `json:"idempotency_key"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	var opts WriteOptions
+	if err := json.Unmarshal(args, &opts); err != nil {
 		return true, ""
 	}
-	return isDryRun(in.DryRun), in.IdempotencyKey
+	return opts.isDryRun(), opts.IdempotencyKey
 }
 
 // outcome describes how a call ended, for the result record.
-func outcome(res mcp.Result, err error) (string, string) {
+func outcome(res mcp.Result, err error) (audit.Outcome, string) {
 	if err != nil {
-		return audit.Failed, err.Error()
+		return audit.Error, auditError(err)
 	}
 	if r, ok := res.(*mcp.CallToolResult); ok && r.IsError {
-		// A Tool's error comes back as text content (see the SDK's
-		// toolForErr).
+		// On the server, the result keeps the Tool's own error.
+		if toolErr := r.GetError(); toolErr != nil {
+			return audit.Error, auditError(toolErr)
+		}
+		// Otherwise the error is only the result's text content (see the
+		// SDK's toolForErr).
 		var msgs []string
 		for _, c := range r.Content {
 			if t, ok := c.(*mcp.TextContent); ok {
 				msgs = append(msgs, t.Text)
 			}
 		}
-		return audit.Failed, strings.Join(msgs, "; ")
+		return audit.Error, strings.Join(msgs, "; ")
 	}
 	return audit.OK, ""
+}
+
+// auditError returns err as the result record shows it. Shopify's errors
+// are recorded by their codes only: their messages can quote the Store's
+// data, which Audit records never hold. The Caller still gets the messages.
+func auditError(err error) string {
+	var graphQLErrs shopify.GraphQLErrors
+	if errors.As(err, &graphQLErrs) {
+		return "shopify: graphql errors, codes: " + graphQLErrs.Codes()
+	}
+	var userErrs shopify.UserErrors
+	if errors.As(err, &userErrs) {
+		return "shopify: user errors, codes: " + userErrs.Codes()
+	}
+	return err.Error()
 }
 
 // shopifyUsage adds up what Shopify reports about the queries one call makes.
@@ -113,7 +129,7 @@ type shopifyUsage struct {
 	rec *audit.Shopify // nil until Shopify answers a query
 }
 
-func (u *shopifyUsage) add(resp *shopify.Response) {
+func (u *shopifyUsage) add(resp *shopify.Meta) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.rec == nil {

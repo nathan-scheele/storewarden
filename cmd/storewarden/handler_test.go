@@ -269,7 +269,7 @@ func startHarness(t *testing.T, whois authz.WhoIser, writeMode bool) *harness {
 	logs := &syncBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	store := newFakeShopify(t)
-	client := shopify.New(store.URL, testClientID, testClientSecret, nil)
+	client := shopify.New(store.URL, testClientID, testClientSecret, nil, logger)
 	sink := &auditSink{}
 	srv := httptest.NewServer(newHandler(whois, client, writeMode, audit.New(sink, logger), logger))
 	t.Cleanup(srv.Close)

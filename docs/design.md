@@ -4,7 +4,7 @@ storewarden is a single Go binary. It joins a tailnet with `tsnet` and serves a 
 
 ## Goals
 
-- Agents on the tailnet can read the Store and correct inventory, and nothing else.
+- Callers on the tailnet can read the Store and correct inventory, and nothing else.
 - Authorization lives in the tailnet policy file, not in storewarden's config.
 - Write tools are off by default, dry run by default, idempotent and compare-and-swap.
 - Every attempted Tool call leaves an Audit record.
@@ -61,7 +61,7 @@ Stateless mode means WhoIs and authorization run on every POST, not once per ses
 **Caller** comes from `local.Client.WhoIs(ctx, r.RemoteAddr)`:
 
 - Always: `Node.StableID`, `Node.Name`.
-- Tagged (`Node.IsTagged()`): `Node.Tags`, and user is recorded as `"tagged"`. Tagged nodes are allowed; they are the main case for agents.
+- Tagged (`Node.IsTagged()`): `Node.Tags`, and user is recorded as `"tagged"`. Tagged nodes are allowed; they are the main case for software Callers.
 - Untagged: `UserProfile.LoginName`.
 
 Names and tags are recorded for the audit trail only and never used to authorize.
@@ -82,6 +82,9 @@ Names and tags are recorded for the audit trail only and never used to authorize
 `ip` grants network reach to port 80. `app` grants the Tools.
 
 ```hujson
+"groups": {
+  "group:inventory": ["alice@example.com"],
+},
 "tagOwners": {
   "tag:storewarden": ["autogroup:admin"],
   "tag:agent":       ["autogroup:admin"],
@@ -126,7 +129,7 @@ All Tools use fixed GraphQL documents against Admin API **2026-10**, pinned as a
 
 - `get_shop` → name, myshopify domain, plan, currency, and the current throttle status.
 - `search_products` (`query` string in Shopify search syntax; `first` 1–50, default 10; optional `after` cursor) → `products[{id, title, handle, status, total_inventory}]`, `next_cursor`.
-- `get_product` (`id` as a product GID) → id, title, handle, status, tags, `variants[{id, title, sku, inventory_item_id}]`.
+- `get_product` (`id` as a product GID) → id, title, handle, status, tags, `variants[{id, title, sku, inventory_item_id}]`. Each variant's `title` and `sku` are there so a Caller can tell variants apart before it reads their inventory.
 - `get_inventory` (`inventory_item_id`) → `levels[{location_id, location_name, available, on_hand}]`.
 - `set_inventory_quantity`. Input: `inventory_item_id`, `location_id`, `quantity` (≥ 0), and these three:
   - `dry_run`: default **true**.
@@ -154,7 +157,9 @@ Write tools are guarded by two keys. They are only registered when the server st
    Shopify enforces both guarantees ([ADR 0002](adr/0002-write-tools-only-where-shopify-enforces-idempotency.md)). These errors are passed back to the Caller in plain words:
    - `CHANGE_FROM_QUANTITY_STALE` → "quantity changed since you read it; dry-run again".
    - `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` → "key reused with different input".
-   - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable: the Tool error starts with `retryable: `.
+   - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable: the Tool error starts with `retryable: ` and ends `Retry the same call in 2s`, the same form as a rate-limited call.
+
+   Retryable errors are marked in their text, not as structured content. A Tool error reaches the Caller as text with `isError: true`; `structuredContent` would have to match the Tool's output schema, which describes a successful result, and an LLM Caller reads the text either way.
 
    Seen on the dev store (2026-10):
    - The input type takes `changeFromQuantity`; it has no `compareQuantity`.
@@ -165,27 +170,27 @@ Write tools are guarded by two keys. They are only registered when the server st
 ## Shopify client (`internal/shopify`)
 
 - **Endpoint:** `POST https://<store>.myshopify.com/admin/api/2026-10/graphql.json`, header `X-Shopify-Access-Token`.
-- **Token source:** client credentials grant (`POST /admin/oauth/access_token`, `grant_type=client_credentials`). The token is cached in memory and reissued 5 minutes before `expires_in` (24h) runs out, and once on a 401. A mutex makes sure only one reissue runs at a time. Tokens are never logged.
+- **Token source:** client credentials grant (`POST /admin/oauth/access_token`, `grant_type=client_credentials`). The token is cached in memory and reissued 5 minutes before `expires_in` (24h) runs out, and once on a 401. If `expires_in` is missing or zero, the token is taken to last 24 hours and a warning is logged. A mutex makes sure only one reissue runs at a time. Tokens are never logged.
 - **Throttle:** one bucket per Store.
   - After every response, record `extensions.cost.throttleStatus` (`currentlyAvailable`, `maximumAvailable`, `restoreRate`). Limits are never hardcoded; until the first response arrives, the bucket assumes it's full.
-  - Before a call, estimate the refill needed for the query's known maximum cost. That cost is the largest `requestedQueryCost` Shopify has reported for the same query document, so Tools don't declare costs; a query not yet costed is sent without waiting. If the wait ends before the request's deadline, wait. If not, fail fast with a retryable error (`shopify.ThrottledError`) that includes the suggested wait.
+  - Before a call, estimate the refill needed for the query's known maximum cost. Each Tool passes that cost, a constant checked against a recording (`internal/tools/cost_test.go`), so the throttle can decide from the very first call. `search_products` passes its cost at the largest page size, 50, whatever page size the Caller asks for. A fixed maximum is always safe, because Shopify works out a query's requested cost from its text and variables before running it ([rate limits](https://shopify.dev/docs/apps/build/apis/graphql-admin/rate-limits)). If the wait ends before the request's deadline, wait. If not, fail fast with a retryable error (`shopify.ThrottledError`) that includes the suggested wait. Every Tool call gets a 30-second deadline (`callTimeout` in `internal/tools`), so this can happen; the Caller sees a Tool error starting `retryable: ` that ends `Retry the same call in <wait>`.
   - On `THROTTLED`, retry once after the calculated wait. Errors and `userErrors` come back as typed Go errors.
 - Shopify's `X-Request-Id` response header goes into the Audit record.
 
 ## Audit (`internal/audit`)
 
 - JSON Lines written to `--audit-log` (path, or `-` for stdout; the default is `-`). This is separate from the operational logs, which go to stderr.
-- **Records:** one per denial. For an allowed call, an `attempt` record before Shopify is called and a `result` record after.
-- **Fail closed:** if the `attempt` record can't be written, the call is refused. If the `result` record can't be written, an error is logged and `/healthz` turns unhealthy.
+- **Records:** one per denial. For an allowed call, an `attempt` record before Shopify is called and a `result` record after. A request refused with HTTP 403 is refused before any MCP exchange, so its denial record has an empty `tool` and no `args`; a denied `tools/call` records both.
+- **Fail closed:** if the `attempt` record can't be written, the call is refused. Any record that can't be written, whether a denial, an attempt or a result, is logged as an error and turns `/healthz` unhealthy until restart: the audit trail is broken either way.
 - **Fields:**
   - time, `request_id`, `phase` (`denied`, `attempt` or `result`)
   - caller: `node_id`, `node_name`, `tags`, `user`
   - `tool`, `args`, `decision`, `reason`
   - `dry_run`, `idempotency_key`
-  - `outcome`, `error`
-  - shopify: `requested_cost`, `actual_cost`, `request_id`
+  - `outcome`, `error`. A Shopify error (GraphQL errors or `userErrors`) is recorded as storewarden's wording plus Shopify's error codes, without Shopify's messages, which can quote Store data. The Caller's Tool error keeps the messages.
+  - shopify: `requested_cost`, `actual_cost`, `request_id`. Costs are summed over every response Shopify sent for the call, so a throttled request and its retry both count; `request_id` is the last response's.
   - `duration_ms`
-- **Never logged:** Shopify response bodies (they can contain customer data) and credentials.
+- **Never logged:** Shopify response bodies and error messages (they can contain customer data) and credentials.
 
 ## Process
 
@@ -206,7 +211,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 - `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`.
 - `TS_AUTHKEY` or `TS_CLIENT_SECRET`. tsnet reads these itself; storewarden adds no Tailscale auth code.
 
-**Listening:** only `tsnet.Server.Listen("tcp", ":80")`, serving `/mcp` and `/healthz`. `/healthz` is unauthenticated, returns 200 or 503 with no body detail, and is the only unauthenticated path. storewarden never calls `ListenFunnel` or `SetServeConfig` and never opens a host listener. `make never-public` (`scripts/never-public`), run by CI and the pre-commit hook, fails if non-test code calls either of those or a standard-library host listener, or uses tsnet without checking `buildfeatures.HasPeerAPIServer`. It is built with `-tags ts_omit_peerapiserver`, because tsnet's peer API would otherwise listen on every host interface, and it refuses to start without that tag ([ADR 0003](adr/0003-build-without-the-peer-api-server.md)).
+**Listening:** only `tsnet.Server.Listen("tcp", ":80")`, serving `/mcp` and `/healthz`. `/healthz` is unauthenticated, returns 200 or 503 with no body detail, and is the only unauthenticated path. storewarden never calls `ListenFunnel` or `SetServeConfig` and never opens a host listener. `make never-public` (`scripts/never-public`), run by CI and the pre-commit hook, fails if non-test code calls either of those or a standard-library host listener (including an `httptest` server, which listens on the host's loopback), or uses tsnet without checking `buildfeatures.HasPeerAPIServer`. It is built with `-tags ts_omit_peerapiserver`, because tsnet's peer API would otherwise listen on every host interface, and it refuses to start without that tag ([ADR 0003](adr/0003-build-without-the-peer-api-server.md)).
 
 **Logging:** `log/slog` JSON handler on stderr. tsnet's backend logs go to slog at debug level. tsnet still uploads its logs to log.tailscale.com, as tsnet does by default. The README explains this and how to opt out (`TS_NO_LOGS_NO_SUPPORT=true`).
 
@@ -220,7 +225,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 | Threat | Mitigation |
 |---|---|
 | Ungranted tailnet peer | WhoIs on every request; no capability → 403; Tools hidden and denied |
-| Granted but prompt-injected agent | Fixed Tools only (no raw query), Read tools by default, Write mode off, dry run by default, compare-and-swap, small grant sets |
+| Granted but prompt-injected Caller | Fixed Tools only (no raw query), Read tools by default, Write mode off, dry run by default, compare-and-swap, small grant sets |
 | Retried or duplicated write | Shopify-enforced Idempotency key |
 | Stale read leading to a wrong write | Expected quantity → `changeFromQuantity` |
 | Session reused by another peer | Stateless MCP (ADR 0001) |

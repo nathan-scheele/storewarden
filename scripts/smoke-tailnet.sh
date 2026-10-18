@@ -218,7 +218,7 @@ SMOKE='{}'       # the last check's JSON result
 SEEN=""          # what the last check saw, in words
 MARK=0           # storewarden's log line count when the current check started
 OPENED_URL=""    # the last tsnet login URL shown
-WORK_TAILNET=""  # the Tailscale app's tailnet, never to be used
+APP_TAILNET=""   # the Tailscale app's tailnet, never to be used
 
 # record PASS|FAIL "check" notes one check's outcome for the results table.
 record() {
@@ -228,7 +228,7 @@ record() {
 }
 
 # visit URL prints a URL to open in the personal browser window. It never
-# opens the default browser, which may be signed into a work account.
+# opens the default browser, which may be signed into another Tailscale account.
 visit() { printf '  %s↗ open in your personal window:%s %s\n' "$GREEN" "$RESET" "$1"; }
 
 # cleanup stops both processes if the wizard exits early. Closing the test
@@ -294,9 +294,9 @@ show_login_url() {
   fi
 }
 
-# require_tailnet NAME WHO stops the wizard if WHO joined the work tailnet.
+# require_tailnet NAME WHO stops the wizard if WHO joined the Tailscale app's tailnet.
 require_tailnet() {
-  if [[ -n "$WORK_TAILNET" && "$1" == "$WORK_TAILNET" ]]; then
+  if [[ -n "$APP_TAILNET" && "$1" == "$APP_TAILNET" ]]; then
     warn "$2 joined \"$1\", the tailnet the Tailscale app is logged into. Stopping."
     note "Remove '$2' from that tailnet's Machines page, and make the auth keys"
     note "again from your personal account."
@@ -421,15 +421,15 @@ if [[ -z "$SHOPIFY_STORE" || -z "$SHOPIFY_CLIENT_ID" || -z "$SHOPIFY_CLIENT_SECR
   missing=1
 fi
 (( missing )) && exit 1
-WORK_TAILNET=$(tailscale status --json 2>/dev/null | python3 -c '
+APP_TAILNET=$(tailscale status --json 2>/dev/null | python3 -c '
 import json, sys
 print((json.load(sys.stdin).get("CurrentTailnet") or {}).get("Name", ""))
 ' 2>/dev/null || true)
 say "Store: $SHOPIFY_STORE"
 say "Everything runs in your personal tailnet. The Tailscale app on this"
 say "machine isn't used."
-if [[ -n "$WORK_TAILNET" ]]; then
-  note "The app is logged into \"$WORK_TAILNET\". The wizard stops if anything joins it."
+if [[ -n "$APP_TAILNET" ]]; then
+  note "The app is logged into \"$APP_TAILNET\". The wizard stops if anything joins it."
 fi
 pause
 
@@ -437,7 +437,7 @@ pause
 stage "Personal Tailscale account"
 step "Open a private window, or a browser profile, signed into your personal"
 step "Tailscale account. Create one at https://login.tailscale.com/start if needed."
-step "Check the tailnet name at the top of the admin console: it must not be your work one."
+step "Check the tailnet name at the top of the admin console: it must not be the one the Tailscale app uses."
 note "From here on the wizard prints URLs for that window instead of opening your"
 note "default browser."
 pause "In your personal admin console? Press Enter"
@@ -479,17 +479,17 @@ pause
 
 # ── 6 ─────────────────────────────────────────────────────────────────────
 stage "Start storewarden"
-local work
-work=$(mktemp -d)
-LOG="$work/storewarden.log"
-SMOKE_LOG="$work/storewarden-smoke.log"
+local tmpdir
+tmpdir=$(mktemp -d)
+LOG="$tmpdir/storewarden.log"
+SMOKE_LOG="$tmpdir/storewarden-smoke.log"
 say "Building storewarden and the test Caller…"
-make build BIN="$work"
+make build BIN="$tmpdir"
 # Secrets reach the processes through their environment, never their arguments.
 (
   export SHOPIFY_CLIENT_ID SHOPIFY_CLIENT_SECRET
   if [[ -n "$TS_AUTHKEY" ]]; then export TS_AUTHKEY; fi
-  exec "$work/storewarden" --store "$SHOPIFY_STORE" --state-dir "$STATE_DIR"
+  exec "$tmpdir/storewarden" --store "$SHOPIFY_STORE" --state-dir "$STATE_DIR"
 ) >"$LOG" 2>&1 &
 SW_PID=$!
 say "Waiting for it to join the tailnet…"
@@ -528,15 +528,15 @@ pause
 
 # ── 7 ─────────────────────────────────────────────────────────────────────
 stage "Start the test Caller"
-mkfifo "$work/smoke.in" "$work/smoke.out"
+mkfifo "$tmpdir/smoke.in" "$tmpdir/smoke.out"
 (
   TS_AUTHKEY="$TS_SMOKE_AUTHKEY"
   export TS_AUTHKEY
-  exec "$work/storewarden-smoke" --target "$ip"
-) <"$work/smoke.in" >"$work/smoke.out" 2>"$SMOKE_LOG" &
+  exec "$tmpdir/storewarden-smoke" --target "$ip"
+) <"$tmpdir/smoke.in" >"$tmpdir/smoke.out" 2>"$SMOKE_LOG" &
 SMOKE_PID=$!
-exec 3>"$work/smoke.in"
-exec 4<"$work/smoke.out"
+exec 3>"$tmpdir/smoke.in"
+exec 4<"$tmpdir/smoke.out"
 say "Waiting for it to join the tailnet…"
 local hello="" smoke_tailnet
 deadline=$(( SECONDS + 180 ))

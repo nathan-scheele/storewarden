@@ -47,6 +47,23 @@ type InventoryLevel struct {
 	OnHand       int    `json:"on_hand" jsonschema:"units physically at the location, whether or not they can be sold"`
 }
 
+// quantity is one of an inventory level's named quantities, as Shopify
+// reports them.
+type quantity struct {
+	Name     string `json:"name"`
+	Quantity int    `json:"quantity"`
+}
+
+// quantityNamed returns the quantity called name, and whether there is one.
+func quantityNamed(quantities []quantity, name string) (int, bool) {
+	for _, q := range quantities {
+		if q.Name == name {
+			return q.Quantity, true
+		}
+	}
+	return 0, false
+}
+
 func getInventory(client *shopify.Client) mcp.ToolHandlerFor[GetInventoryInput, Inventory] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in GetInventoryInput) (*mcp.CallToolResult, Inventory, error) {
 		if err := checkID("inventory_item_id", "InventoryItem", in.InventoryItemID); err != nil {
@@ -60,16 +77,13 @@ func getInventory(client *shopify.Client) mcp.ToolHandlerFor[GetInventoryInput, 
 							ID   string `json:"id"`
 							Name string `json:"name"`
 						} `json:"location"`
-						Quantities []struct {
-							Name     string `json:"name"`
-							Quantity int    `json:"quantity"`
-						} `json:"quantities"`
+						Quantities []quantity `json:"quantities"`
 					} `json:"nodes"`
 				} `json:"inventoryLevels"`
 			} `json:"inventoryItem"`
 		}
 		variables := map[string]any{"id": in.InventoryItemID}
-		if _, err := client.Query(ctx, getInventoryQuery, variables, &data); err != nil {
+		if _, err := client.Query(ctx, getInventoryQuery, getInventoryMaxCost, variables, &data); err != nil {
 			return nil, Inventory{}, err
 		}
 		// Shopify answers null for an ID it doesn't know.
@@ -78,16 +92,15 @@ func getInventory(client *shopify.Client) mcp.ToolHandlerFor[GetInventoryInput, 
 		}
 		out := Inventory{Levels: []InventoryLevel{}}
 		for _, level := range data.InventoryItem.InventoryLevels.Nodes {
-			l := InventoryLevel{LocationID: level.Location.ID, LocationName: level.Location.Name}
-			for _, q := range level.Quantities {
-				switch q.Name {
-				case "available":
-					l.Available = q.Quantity
-				case "on_hand":
-					l.OnHand = q.Quantity
-				}
-			}
-			out.Levels = append(out.Levels, l)
+			// A quantity Shopify leaves out counts as 0.
+			available, _ := quantityNamed(level.Quantities, "available")
+			onHand, _ := quantityNamed(level.Quantities, "on_hand")
+			out.Levels = append(out.Levels, InventoryLevel{
+				LocationID:   level.Location.ID,
+				LocationName: level.Location.Name,
+				Available:    available,
+				OnHand:       onHand,
+			})
 		}
 		return nil, out, nil
 	}

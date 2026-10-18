@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,6 +24,10 @@ const maxResponseBytes = 10 << 20
 
 // renewBefore is how long before its expiry an access token is replaced.
 const renewBefore = 5 * time.Minute
+
+// defaultTokenLifetime is how long an access token is taken to last when
+// Shopify's response doesn't say. Shopify documents 24 hours.
+const defaultTokenLifetime = 24 * time.Hour
 
 // clock is the client's source of time. Tests replace it so they never
 // really sleep.
@@ -45,6 +50,7 @@ type Client struct {
 	clientID     string
 	clientSecret string
 	hc           *http.Client
+	logger       *slog.Logger
 	clock        clock
 	bucket       bucket // the Store's query cost bucket, as far as the client knows it
 
@@ -54,8 +60,8 @@ type Client struct {
 }
 
 // New returns a Client for the Store at baseURL ("https://<name>.myshopify.com").
-// If hc is nil, http.DefaultClient is used.
-func New(baseURL, clientID, clientSecret string, hc *http.Client) *Client {
+// If hc is nil, http.DefaultClient is used. Warnings go to logger.
+func New(baseURL, clientID, clientSecret string, hc *http.Client, logger *slog.Logger) *Client {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
@@ -64,6 +70,7 @@ func New(baseURL, clientID, clientSecret string, hc *http.Client) *Client {
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		hc:           hc,
+		logger:       logger,
 		clock:        realClock{},
 	}
 }
@@ -82,55 +89,58 @@ type Cost struct {
 	ThrottleStatus     ThrottleStatus `json:"throttleStatus"`
 }
 
-// Response is what Shopify reports about a query besides its data.
-type Response struct {
+// Meta is what Shopify reports about a query besides its data.
+type Meta struct {
 	Cost      *Cost  // nil if Shopify didn't report it
 	RequestID string // Shopify's X-Request-Id
 }
 
 type observerKey struct{}
 
-// WithObserver returns a copy of ctx in which every Query that gets a
-// response from Shopify passes it to observe, the way net/http/httptrace
-// reports on requests. It lets the Audit record collect each call's costs
-// and request IDs without every Tool passing them along.
-func WithObserver(ctx context.Context, observe func(*Response)) context.Context {
+// WithObserver returns a copy of ctx in which Query passes observe every
+// response it gets from Shopify, the way net/http/httptrace reports on
+// requests. A throttled query and its retry are two responses. It lets the
+// Audit record collect each call's costs and request IDs without every Tool
+// passing them along.
+func WithObserver(ctx context.Context, observe func(*Meta)) context.Context {
 	return context.WithValue(ctx, observerKey{}, observe)
 }
 
-// Query runs a GraphQL query and decodes its data into data.
-//
-// It first waits for the Store's cost bucket to hold enough for the query,
-// or returns a *ThrottledError at once if that wait would outlast ctx's
-// deadline. If Shopify throttles the query anyway, it is retried once the
-// same way. Shopify's errors come back as GraphQLErrors or UserErrors. The
-// Response, when not nil, is from the last request Shopify answered, even
-// if there is an error.
-func (c *Client) Query(ctx context.Context, query string, variables map[string]any, data any) (*Response, error) {
-	resp, err := c.query(ctx, query, variables, data)
-	if observe, ok := ctx.Value(observerKey{}).(func(*Response)); ok && resp != nil {
+// report passes resp to ctx's observer, if it has one and resp isn't nil.
+func report(ctx context.Context, resp *Meta) {
+	if observe, ok := ctx.Value(observerKey{}).(func(*Meta)); ok && resp != nil {
 		observe(resp)
 	}
-	return resp, err
 }
 
-func (c *Client) query(ctx context.Context, query string, variables map[string]any, data any) (*Response, error) {
+// Query runs a GraphQL query and decodes its data into data. maxCost is the
+// most the query can cost, in Shopify's query cost points.
+//
+// It first waits for the Store's cost bucket to hold maxCost, or returns a
+// *ThrottledError at once if that wait would outlast ctx's deadline. If
+// Shopify throttles the query anyway, it is retried once the same way.
+// Shopify's errors come back as GraphQLErrors or UserErrors. The Meta,
+// when not nil, is from the last request Shopify answered, even if there is
+// an error.
+func (c *Client) Query(ctx context.Context, query string, maxCost float64, variables map[string]any, data any) (*Meta, error) {
 	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.queryOnce(ctx, query, body, data)
+	resp, err := c.queryOnce(ctx, maxCost, body, data)
+	report(ctx, resp)
 	if !throttled(err) {
 		return resp, err
 	}
 	// The bucket now holds Shopify's figures from the throttled response,
 	// so the retry waits just long enough.
-	retryResp, err := c.queryOnce(ctx, query, body, data)
+	retryResp, err := c.queryOnce(ctx, maxCost, body, data)
+	report(ctx, retryResp)
 	if retryResp != nil {
 		resp = retryResp
 	}
 	if throttled(err) {
-		return resp, &ThrottledError{Wait: c.bucket.wait(c.clock.Now(), query)}
+		return resp, &ThrottledError{Wait: c.bucket.wait(c.clock.Now(), maxCost)}
 	}
 	return resp, err
 }
@@ -142,8 +152,8 @@ func throttled(err error) bool {
 }
 
 // queryOnce waits for capacity, then sends one query and decodes the answer.
-func (c *Client) queryOnce(ctx context.Context, query string, body []byte, data any) (*Response, error) {
-	if err := c.waitForCapacity(ctx, query); err != nil {
+func (c *Client) queryOnce(ctx context.Context, maxCost float64, body []byte, data any) (*Meta, error) {
+	if err := c.waitForCapacity(ctx, maxCost); err != nil {
 		return nil, err
 	}
 	resp, err := c.post(ctx, body)
@@ -151,7 +161,7 @@ func (c *Client) queryOnce(ctx context.Context, query string, body []byte, data 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	meta := &Response{RequestID: resp.Header.Get("X-Request-Id")}
+	meta := &Meta{RequestID: resp.Header.Get("X-Request-Id")}
 	if resp.StatusCode != http.StatusOK {
 		return meta, fmt.Errorf("shopify: graphql: HTTP %d", resp.StatusCode)
 	}
@@ -172,7 +182,7 @@ func (c *Client) queryOnce(ctx context.Context, query string, body []byte, data 
 		return meta, fmt.Errorf("shopify: graphql: decoding response: %w", err)
 	}
 	meta.Cost = out.Extensions.Cost
-	c.bucket.record(c.clock.Now(), query, meta.Cost)
+	c.bucket.record(c.clock.Now(), meta.Cost)
 	if len(out.Errors) > 0 {
 		errs := make(GraphQLErrors, len(out.Errors))
 		for i, e := range out.Errors {
@@ -268,7 +278,15 @@ func (c *Client) accessToken(ctx context.Context, refused string) (string, error
 	if out.AccessToken == "" {
 		return "", errors.New("shopify: access token: response has no token")
 	}
+	lifetime := time.Duration(out.ExpiresIn) * time.Second
+	if lifetime <= 0 {
+		// Without this, a token that seems to expire at once would be
+		// replaced before every query.
+		c.logger.Warn("Shopify access token has no expires_in; assuming it lasts the documented 24 hours",
+			"expires_in", out.ExpiresIn)
+		lifetime = defaultTokenLifetime
+	}
 	c.token = out.AccessToken
-	c.expiry = c.clock.Now().Add(time.Duration(out.ExpiresIn) * time.Second)
+	c.expiry = c.clock.Now().Add(lifetime)
 	return c.token, nil
 }

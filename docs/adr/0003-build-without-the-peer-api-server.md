@@ -9,4 +9,4 @@ storewarden is built with `-tags ts_omit_peerapiserver`, and refuses to start wi
 
 ## Consequences
 
-Every build, including CI and the smoke test, passes `-tags ts_omit_peerapiserver`. Revisit this ADR if tsnet stops binding the peer API to host interfaces, or if storewarden ever needs a peer API feature.
+Every build, including CI and the smoke test, passes `-tags ts_omit_peerapiserver`. `make never-public` checks that the guard stays: it fails if a package imports tsnet but never reads `buildfeatures.HasPeerAPIServer`. The same check also fails on non-test code that starts an `httptest` server, since that listens on the host's loopback interface, alongside the standard-library listeners `docs/design.md` lists. Revisit this ADR if tsnet stops binding the peer API to host interfaces, or if storewarden ever needs a peer API feature.

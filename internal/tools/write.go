@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -78,21 +79,28 @@ type SetInventoryQuantityInput struct {
 	InventoryItemID string `json:"inventory_item_id" jsonschema:"the inventory item's ID, such as gid://shopify/InventoryItem/123, from get_product"`
 	LocationID      string `json:"location_id" jsonschema:"the location's ID, such as gid://shopify/Location/123, from get_inventory"`
 	Quantity        int    `json:"quantity" jsonschema:"the new available quantity, 0 or more"`
-	// A pointer, so that a missing dry_run can mean true.
-	DryRun         *bool  `json:"dry_run,omitempty" jsonschema:"true (the default) only reports the change; false makes it"`
-	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"required when dry_run is false: up to 255 characters, new for each change and the same when retrying it; a UUID is a good choice"`
+	// Embedded, so dry_run and idempotency_key are inputs of this Tool too.
+	WriteOptions
 	// A pointer, so that 0 differs from missing.
 	ExpectedQuantity *int `json:"expected_quantity,omitempty" jsonschema:"required when dry_run is false: the available quantity you believe is current, from a dry run"`
 }
 
+// WriteOptions are the inputs every Write tool takes. Every Write tool's
+// input embeds them, and the Audit records show them.
+type WriteOptions struct {
+	// A pointer, so that a missing dry_run can mean true.
+	DryRun         *bool  `json:"dry_run,omitempty" jsonschema:"true (the default) only reports the change; false makes it"`
+	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"required when dry_run is false: up to 255 characters, new for each change and the same when retrying it; a UUID is a good choice"`
+}
+
+// isDryRun reports whether the call is a Dry run: every call is, unless the
+// Caller says false.
+func (o WriteOptions) isDryRun() bool {
+	return o.DryRun == nil || *o.DryRun
+}
+
 // maxIdempotencyKeyLength is the longest Idempotency key a Caller may give.
 const maxIdempotencyKeyLength = 255
-
-// isDryRun reports whether a call with this dry_run argument is a Dry run:
-// every call is, unless the Caller says false.
-func isDryRun(dryRun *bool) bool {
-	return dryRun == nil || *dryRun
-}
 
 // checkRealWrite returns an error unless in has what a real write needs.
 func checkRealWrite(in SetInventoryQuantityInput) error {
@@ -128,7 +136,7 @@ func setInventoryQuantity(client *shopify.Client) mcp.ToolHandlerFor[SetInventor
 		if in.Quantity < 0 {
 			return nil, InventoryChange{}, fmt.Errorf("quantity must be 0 or more, not %d", in.Quantity)
 		}
-		if !isDryRun(in.DryRun) {
+		if !in.isDryRun() {
 			if err := checkRealWrite(in); err != nil {
 				return nil, InventoryChange{}, err
 			}
@@ -165,15 +173,12 @@ func availableQuantity(ctx context.Context, client *shopify.Client, item, locati
 	var data struct {
 		InventoryItem *struct {
 			InventoryLevel *struct {
-				Quantities []struct {
-					Name     string `json:"name"`
-					Quantity int    `json:"quantity"`
-				} `json:"quantities"`
+				Quantities []quantity `json:"quantities"`
 			} `json:"inventoryLevel"`
 		} `json:"inventoryItem"`
 	}
 	variables := map[string]any{"inventoryItemId": item, "locationId": location}
-	if _, err := client.Query(ctx, getAvailableQuantityQuery, variables, &data); err != nil {
+	if _, err := client.Query(ctx, getAvailableQuantityQuery, getAvailableQuantityMaxCost, variables, &data); err != nil {
 		return 0, err
 	}
 	// Shopify answers null for an ID it doesn't know, and for a location
@@ -184,12 +189,11 @@ func availableQuantity(ctx context.Context, client *shopify.Client, item, locati
 	if data.InventoryItem.InventoryLevel == nil {
 		return 0, fmt.Errorf("inventory item %s isn't stocked at location %s", item, location)
 	}
-	for _, q := range data.InventoryItem.InventoryLevel.Quantities {
-		if q.Name == "available" {
-			return q.Quantity, nil
-		}
+	available, ok := quantityNamed(data.InventoryItem.InventoryLevel.Quantities, "available")
+	if !ok {
+		return 0, errors.New("shopify reported no available quantity")
 	}
-	return 0, errors.New("shopify reported no available quantity")
+	return available, nil
 }
 
 // setAvailableQuantity makes a real write of in, which checkRealWrite has
@@ -207,14 +211,19 @@ func setAvailableQuantity(ctx context.Context, client *shopify.Client, in SetInv
 	// The Tool needs nothing from the response: Query returns Shopify's
 	// user errors as an error, and no error means the change was made.
 	var data struct{}
-	_, err := client.Query(ctx, setAvailableQuantityMutation, variables, &data)
+	_, err := client.Query(ctx, setAvailableQuantityMutation, setAvailableQuantityMaxCost, variables, &data)
 	return plainWriteError(err)
 }
 
+// concurrentRequestWait is how long a Caller is told to wait before
+// retrying a write that is still in progress. Shopify doesn't say; the
+// first call usually finishes in well under this.
+const concurrentRequestWait = 2 * time.Second
+
 // plainWriteError turns Shopify's refusals of a real write, which come back
 // as user errors with these codes, into errors that tell the Caller what to
-// do next. The one refusal worth retrying unchanged is marked by starting
-// with "retryable: ". Any other error is returned as it is.
+// do next. The one refusal worth retrying unchanged is a retryableError.
+// Any other error is returned as it is.
 func plainWriteError(err error) error {
 	var userErrs shopify.UserErrors
 	if !errors.As(err, &userErrs) {
@@ -230,8 +239,11 @@ func plainWriteError(err error) error {
 			return errors.New("idempotency_key was already used with different input. " +
 				"Nothing was changed. Use a new idempotency_key for each new change, and reuse a key only to retry exactly the same call")
 		case "IDEMPOTENCY_CONCURRENT_REQUEST":
-			return errors.New("retryable: a call with this idempotency_key is still in progress, so this call changed nothing itself. " +
-				"Retry exactly the same call, with the same idempotency_key, in a few seconds; Shopify makes the change only once")
+			return &retryableError{
+				reason: "a call with this idempotency_key is still in progress, so this call changed nothing itself. " +
+					"Keep the same idempotency_key: Shopify makes the change only once",
+				wait: concurrentRequestWait,
+			}
 		}
 	}
 	return err
