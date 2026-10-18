@@ -1,0 +1,8 @@
+query GetShop {
+  shop {
+    name
+    myshopifyDomain
+    currencyCode
+    plan { publicDisplayName }
+  }
+}
