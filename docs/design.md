@@ -126,7 +126,7 @@ All Tools use fixed GraphQL documents against Admin API **2026-10**, pinned as a
 
 **Inputs and outputs** (Go structs, schema inferred by the SDK):
 
-- `get_shop` → name, myshopify domain, plan, currency, and the current throttle status.
+- `get_shop` → name, myshopify domain, plan, currency, the Store's current throttle status, and the calling Caller's own Quota (`available`, `maximum`, `restore_rate`, read after the call's own charge; omitted until Shopify has reported the Store's limits).
 - `search_products` (`query` string in Shopify search syntax; `first` 1–50, default 10; optional `after` cursor) → `products[{id, title, handle, status, total_inventory}]`, `next_cursor`.
 - `get_product` (`id` as a product GID) → id, title, handle, status, tags, `variants[{id, title, sku, inventory_item_id}]`. Each variant's `title` and `sku` are there so a Caller can tell variants apart before it reads their inventory.
 - `get_inventory` (`inventory_item_id`) → `levels[{location_id, location_name, available, on_hand, damaged, quality_control, safety_stock}]`.
@@ -180,7 +180,7 @@ Write tools are guarded by two keys. They are only registered when the server st
   - Every request sent for the Caller is charged at the query's known maximum cost, the same constant the throttle uses, including Dry run reads and a throttled retry. Charges are never reconciled with the actual cost or refunded, even if the Store bucket then refuses the query.
   - The Quota is checked first and never waits: if it can't cover the cost, the query fails at once with a `shopify.QuotaError` carrying the suggested wait. The Caller sees the retryable form above, worded as its Quota: `retryable: your Quota of the Store's rate limit is used up, so nothing was done. Retry the same call in <wait>`. The Store bucket then keeps its wait-or-fail-fast rule.
   - The refusal is an allowed call that failed: an attempt and a result record whose error names the Quota, and no `denied` record.
-  - Quotas live in a map from key to bucket behind a mutex, in memory only, reset on restart. Nothing is evicted: there is one per tailnet node at most. `Client.Quota` reports a Quota's state.
+  - Quotas live in a map from key to bucket behind a mutex, in memory only, reset on restart. Nothing is evicted: there is one per tailnet node at most. `Client.Quota` reports a Quota's state, which `get_shop` shows the Caller.
 - Shopify's `X-Request-Id` response header goes into the Audit record.
 
 ## Audit (`internal/audit`)

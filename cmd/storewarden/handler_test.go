@@ -351,6 +351,13 @@ func TestGrantedCallerSeesAndCallsGetShop(t *testing.T) {
 			"maximum_available":   20000.0,
 			"restore_rate":        1000.0,
 		},
+		// The share 0.5 of the Store's bucket. The Caller's Quota is new,
+		// and a new Quota starts full.
+		"quota": map[string]any{
+			"available":    10000.0,
+			"maximum":      10000.0,
+			"restore_rate": 500.0,
+		},
 	}
 	if got := callGetShop(t, cs); !reflect.DeepEqual(got, want) {
 		t.Errorf("get_shop =\n%v\nwant\n%v", got, want)
