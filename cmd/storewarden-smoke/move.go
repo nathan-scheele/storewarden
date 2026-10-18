@@ -48,8 +48,8 @@ func (st states) String() string {
 	return fmt.Sprintf("available=%d damaged=%d", st.available, st.damaged)
 }
 
-// states reads the available and damaged quantities of item at location.
-func (s session) states(ctx context.Context, item, location string) (states, error) {
+// readStates reads the available and damaged quantities of item at location.
+func (s session) readStates(ctx context.Context, item, location string) (states, error) {
 	level, err := s.level(ctx, item, location)
 	return states{level.Available, level.Damaged}, err
 }
@@ -58,7 +58,7 @@ func (s session) states(ctx context.Context, item, location string) (states, err
 func runMove(ctx context.Context, s session, item, location string) scenario {
 	sc := scenario{Steps: []step{}, ItemID: item, LocationID: location}
 
-	before, err := s.states(ctx, item, location)
+	before, err := s.readStates(ctx, item, location)
 	if err != nil {
 		sc.Error = err.Error()
 		return sc
@@ -75,7 +75,7 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 	if toolErr, err := s.call(ctx, moveTool, toDamaged, &dry); sc.failed(dryRun, toolErr, err) {
 		return sc
 	}
-	now, err := s.states(ctx, item, location)
+	now, err := s.readStates(ctx, item, location)
 	sc.record(dryRun, err == nil && dry.DryRun && !dry.Applied &&
 		dry.From == tools.StateChange{Current: before.available, New: moved.available} &&
 		dry.To == tools.StateChange{Current: before.damaged, New: moved.damaged} && now == before,
@@ -89,7 +89,7 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 		return sc
 	}
 	sc.ExecutedID = done.RequestID
-	now, err = s.states(ctx, item, location)
+	now, err = s.readStates(ctx, item, location)
 	sc.record(executed, err == nil && done.Applied && !done.DryRun && now == moved,
 		fmt.Sprintf("applied=%t, then %s %s; request_id %s", done.Applied, now, errText(err), done.RequestID))
 
@@ -100,7 +100,7 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 	if toolErr != "" {
 		seen = "Tool error: " + toolErr
 	}
-	now, statesErr := s.states(ctx, item, location)
+	now, statesErr := s.readStates(ctx, item, location)
 	sc.record("retrying the move with the same key doesn't move again",
 		err == nil && (toolErr == "" || strings.HasPrefix(toolErr, staleMoveText)) && statesErr == nil && now == moved,
 		fmt.Sprintf("%s; then %s %s", seen, now, errText(err, statesErr)))
@@ -109,7 +109,7 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 	stale := realMove(toDamaged, newKey(), before.available, before.damaged)
 	var refused tools.InventoryMove
 	toolErr, err = s.call(ctx, moveTool, stale, &refused)
-	now, statesErr = s.states(ctx, item, location)
+	now, statesErr = s.readStates(ctx, item, location)
 	sc.record("a move with stale Expected quantities is refused with the stale-quantity error",
 		err == nil && strings.HasPrefix(toolErr, staleMoveText) && statesErr == nil && now == moved,
 		fmt.Sprintf("Tool error %q; then %s %s", toolErr, now, errText(err, statesErr)))
@@ -125,7 +125,7 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 	honestErr, err := s.call(ctx, moveTool, honest, &over)
 	inflated := realMove(fromDamaged, newKey(), fromDamaged.Quantity, moved.available)
 	shopifyErr, inflatedErr := s.call(ctx, moveTool, inflated, &over)
-	now, statesErr = s.states(ctx, item, location)
+	now, statesErr = s.readStates(ctx, item, location)
 	// The check's name carries Shopify's answer, so that the results table
 	// records it.
 	answer := "an error"
@@ -150,7 +150,7 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 		return sc
 	}
 	sc.RestoredID = restored.RequestID
-	now, err = s.states(ctx, item, location)
+	now, err = s.readStates(ctx, item, location)
 	sc.record(movedBack, err == nil && restored.Applied && now == before,
 		fmt.Sprintf("%s %s; request_id %s", now, errText(err), restored.RequestID))
 	return sc
