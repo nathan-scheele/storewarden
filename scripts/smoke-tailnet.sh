@@ -297,7 +297,7 @@ show_login_url() {
 # require_tailnet NAME WHO stops the wizard if WHO joined the Tailscale app's tailnet.
 require_tailnet() {
   if [[ -n "$APP_TAILNET" && "$1" == "$APP_TAILNET" ]]; then
-    warn "$2 joined \"$1\", the tailnet the Tailscale app is logged into. Stopping."
+    warn "$2 joined the tailnet the Tailscale app is logged into. Stopping."
     note "Remove '$2' from that tailnet's Machines page, and make the auth keys"
     note "again from your personal account."
     [[ "$2" == storewarden ]] && note "Then delete \"$STATE_DIR\" so the next run registers afresh."
@@ -404,7 +404,7 @@ case "$(uname)" in
   *)      STATE_DIR="${STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/storewarden}" ;;
 esac
 
-banner "storewarden tailnet smoke test (#2)"
+banner "storewarden smoke test, part 1: tailnet checks (#9)"
 
 # ── 1 ─────────────────────────────────────────────────────────────────────
 stage "Preflight"
@@ -429,7 +429,7 @@ say "Store: $SHOPIFY_STORE"
 say "Everything runs in your personal tailnet. The Tailscale app on this"
 say "machine isn't used."
 if [[ -n "$APP_TAILNET" ]]; then
-  note "The app is logged into \"$APP_TAILNET\". The wizard stops if anything joins it."
+  note "The wizard stops if anything joins the tailnet the Tailscale app is logged into."
 fi
 pause
 
@@ -648,7 +648,7 @@ say "Stopping the test Caller; it removes its own node from the tailnet."
 exec 3>&-
 wait "$SMOKE_PID" || true
 SMOKE_PID=""
-say "Left in place, for the next run and the #9 smoke test:"
+say "Left in place, for the next run and Part 2 of the smoke test (README):"
 note "  - the 'storewarden' node, and its state in \"$STATE_DIR\""
 note "  - the tags and grant in the policy file"
 note "  - the test Caller's key, as TS_SMOKE_AUTHKEY in $ENV_FILE"
@@ -669,15 +669,15 @@ say "$passed passed, $failed failed."
 note "Logs: $LOG"
 printf '\n'
 # The comment names no tailnet, node or address: the repo is public.
-if confirm "Post this table as a comment on issue #2?"; then
+if confirm "Post this table as a comment on issue #9?"; then
   local body
   body="Manual tailnet check with \`scripts/smoke-tailnet.sh\` at $(git rev-parse --short HEAD): $passed passed, $failed failed."$'\n\n'
   body+="| Result | Check |"$'\n'"|---|---|"$'\n'"$table"$'\n'
   body+="The calls were made by \`cmd/storewarden-smoke\`, a separate ephemeral tailnet node, with the official MCP SDK client."
-  if gh issue comment 2 -R nathan-scheele/storewarden --body "$body" >/dev/null; then
-    printf '  %s✓ posted%s to issue #2\n' "$GREEN" "$RESET"
+  if gh issue comment 9 -R nathan-scheele/storewarden --body "$body" >/dev/null; then
+    printf '  %s✓ posted%s to issue #9\n' "$GREEN" "$RESET"
   else
-    SKIPPED+=("posting the results to issue #2")
+    SKIPPED+=("posting the results to issue #9")
   fi
 fi
 
