@@ -215,6 +215,7 @@ SMOKE_PID=""     # storewarden-smoke, the test Caller; fds 3 (its stdin) and 4 (
 LOG=""           # storewarden's JSON log lines
 SMOKE_LOG=""     # storewarden-smoke's stderr
 SMOKE='{}'       # the last check's JSON result
+SEEN=""          # what the last check saw, in words
 MARK=0           # storewarden's log line count when the current check started
 OPENED_URL=""    # the last tsnet login URL shown
 WORK_TAILNET=""  # the Tailscale app's tailnet, never to be used
@@ -308,20 +309,27 @@ require_tailnet() {
 smoke_check() {
   printf 'check\n' >&3
   if ! read -r -t 60 SMOKE <&4; then SMOKE='{}'; fi
+  if [[ -n "$(smoke_get error)" ]]; then SEEN="error: $(smoke_get error)"
+  else SEEN="healthz $(smoke_get healthz), MCP HTTP $(smoke_get mcp), tools [$(smoke_get tools)]"; fi
 }
 smoke_get() { json_get "$SMOKE" "$1"; }
 
-# poll SECONDS CHECK runs CHECK every 3 s until it succeeds or time runs out.
-# Policy edits take a few seconds to reach the storewarden node.
+# poll SECONDS CHECK runs CHECK every 3 s until it succeeds, showing what the
+# last check saw. When time runs out it asks whether to keep waiting. Policy
+# edits usually reach the storewarden node within seconds.
 poll() {
-  local deadline=$(( SECONDS + $1 ))
-  printf '  %swaiting' "$DIM"
-  while (( SECONDS < deadline )); do
-    if "$2"; then printf '%s\n' "$RESET"; return 0; fi
-    printf '.'; sleep 3
+  local deadline
+  while true; do
+    deadline=$(( SECONDS + $1 ))
+    while (( SECONDS < deadline )); do
+      if "$2"; then printf '\r\033[K'; return 0; fi
+      printf '\r\033[K  %swaiting %ss · seen: %s%s' "$DIM" "$(( deadline - SECONDS ))" "$SEEN" "$RESET"
+      sleep 3
+    done
+    printf '\n'
+    warn "Not there yet. Last seen: $SEEN"
+    confirm "Keep waiting another $1 s?" || return 1
   done
-  printf '%s\n' "$RESET"
-  return 1
 }
 
 check_healthy()     { smoke_check; [[ "$(smoke_get healthz)" == 200 && "$(smoke_get healthz_body)" == healthy ]]; }
