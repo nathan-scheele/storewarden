@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -110,5 +111,57 @@ func TestAQuotaRefusalHasAttemptAndResultRecordsAndNoDenial(t *testing.T) {
 	}
 	if shopify, ok := result["shopify"]; ok {
 		t.Errorf("result record has Shopify fields, but Shopify wasn't called: %v", shopify)
+	}
+}
+
+// quotaOf returns the Quota a get_shop output shows.
+func quotaOf(t *testing.T, shop map[string]any) map[string]any {
+	t.Helper()
+	q, ok := shop["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("get_shop has no quota: %v", shop)
+	}
+	return q
+}
+
+func TestGetShopShowsEachCallerItsOwnQuota(t *testing.T) {
+	whois := &switchWhoIs{whois: asNode("nCALLER-A", grantedTo(getShopGrant))}
+	h := newHarness(t, whois)
+	// With no refill, the Quotas hold still while the test runs.
+	h.store.replaceInResponses(`"restoreRate": 1000.0`, `"restoreRate": 0.0`)
+	cs := h.connect(t)
+	callGetShop(t, cs) // the Store's limits aren't known yet, so this is free
+	callGetShop(t, cs) // A's Quota: 10000 - 2
+	gotA := quotaOf(t, callGetShop(t, cs))
+
+	whois.set(asNode("nCALLER-B", grantedTo(getShopGrant)))
+	gotB := quotaOf(t, callGetShop(t, cs))
+
+	wantA := map[string]any{"available": 9996.0, "maximum": 10000.0, "restore_rate": 0.0}
+	if !reflect.DeepEqual(gotA, wantA) {
+		t.Errorf("A's quota = %v, want %v", gotA, wantA)
+	}
+	wantB := map[string]any{"available": 9998.0, "maximum": 10000.0, "restore_rate": 0.0}
+	if !reflect.DeepEqual(gotB, wantB) {
+		t.Errorf("B's quota = %v, want %v", gotB, wantB)
+	}
+}
+
+// A Quota is a share of the Store's limits, so until Shopify reports them
+// there is no Quota to show.
+func TestGetShopLeavesOutTheQuotaUntilShopifyReportsItsLimits(t *testing.T) {
+	h := newHarness(t, grantedTo(getShopGrant))
+	// Shopify reports its limits in extensions.cost, which these responses
+	// now lack.
+	h.store.replaceInResponses(`"extensions"`, `"unreported"`)
+	cs := h.connect(t)
+
+	got := callGetShop(t, cs)
+
+	if q, ok := got["quota"]; ok {
+		t.Errorf("get_shop shows a quota before Shopify reported its limits: %v", q)
+	}
+	if ts, ok := got["throttle_status"]; ok {
+		t.Errorf("get_shop shows a throttle status Shopify didn't report: %v", ts)
 	}
 }
