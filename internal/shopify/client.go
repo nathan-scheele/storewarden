@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,6 +24,10 @@ const maxResponseBytes = 10 << 20
 
 // renewBefore is how long before its expiry an access token is replaced.
 const renewBefore = 5 * time.Minute
+
+// defaultTokenLifetime is how long an access token is taken to last when
+// Shopify's response doesn't say. Shopify documents 24 hours.
+const defaultTokenLifetime = 24 * time.Hour
 
 // clock is the client's source of time. Tests replace it so they never
 // really sleep.
@@ -45,6 +50,7 @@ type Client struct {
 	clientID     string
 	clientSecret string
 	hc           *http.Client
+	logger       *slog.Logger
 	clock        clock
 	bucket       bucket // the Store's query cost bucket, as far as the client knows it
 
@@ -54,8 +60,8 @@ type Client struct {
 }
 
 // New returns a Client for the Store at baseURL ("https://<name>.myshopify.com").
-// If hc is nil, http.DefaultClient is used.
-func New(baseURL, clientID, clientSecret string, hc *http.Client) *Client {
+// If hc is nil, http.DefaultClient is used. Warnings go to logger.
+func New(baseURL, clientID, clientSecret string, hc *http.Client, logger *slog.Logger) *Client {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
@@ -64,6 +70,7 @@ func New(baseURL, clientID, clientSecret string, hc *http.Client) *Client {
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		hc:           hc,
+		logger:       logger,
 		clock:        realClock{},
 	}
 }
@@ -271,7 +278,15 @@ func (c *Client) accessToken(ctx context.Context, refused string) (string, error
 	if out.AccessToken == "" {
 		return "", errors.New("shopify: access token: response has no token")
 	}
+	lifetime := time.Duration(out.ExpiresIn) * time.Second
+	if lifetime <= 0 {
+		// Without this, a token that seems to expire at once would be
+		// replaced before every query.
+		c.logger.Warn("Shopify access token has no expires_in; assuming it lasts the documented 24 hours",
+			"expires_in", out.ExpiresIn)
+		lifetime = defaultTokenLifetime
+	}
 	c.token = out.AccessToken
-	c.expiry = c.clock.Now().Add(time.Duration(out.ExpiresIn) * time.Second)
+	c.expiry = c.clock.Now().Add(lifetime)
 	return c.token, nil
 }

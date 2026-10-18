@@ -1,10 +1,12 @@
 package shopify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -72,15 +74,16 @@ func (f *fakeClock) Waits() []time.Duration {
 type fakeShopify struct {
 	*httptest.Server
 
-	mu      sync.Mutex
-	issued  int
-	tokens  []string // token sent with each GraphQL request, in order
-	graphql func(w http.ResponseWriter, token string, call int)
+	mu        sync.Mutex
+	expiresIn any // expires_in sent with each token; nil leaves it out
+	issued    int
+	tokens    []string // token sent with each GraphQL request, in order
+	graphql   func(w http.ResponseWriter, token string, call int)
 }
 
 func newFakeShopify(t *testing.T, graphql func(w http.ResponseWriter, token string, call int)) *fakeShopify {
 	t.Helper()
-	f := &fakeShopify{graphql: graphql}
+	f := &fakeShopify{graphql: graphql, expiresIn: 86399}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /admin/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("grant_type") != "client_credentials" ||
@@ -90,10 +93,13 @@ func newFakeShopify(t *testing.T, graphql func(w http.ResponseWriter, token stri
 		}
 		f.mu.Lock()
 		f.issued++
-		token := fmt.Sprintf("token-%d", f.issued)
+		resp := map[string]any{"access_token": fmt.Sprintf("token-%d", f.issued)}
+		if f.expiresIn != nil {
+			resp["expires_in"] = f.expiresIn
+		}
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"access_token": token, "expires_in": 86399})
+		json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("POST /admin/api/"+APIVersion+"/graphql.json", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-Shopify-Access-Token")
@@ -136,8 +142,11 @@ func answer(body string) func(http.ResponseWriter, string, int) {
 	return func(w http.ResponseWriter, _ string, _ int) { fmt.Fprint(w, body) }
 }
 
+// discard is a logger for tests that don't look at the logs.
+var discard = slog.New(slog.DiscardHandler)
+
 func newTestClient(f *fakeShopify, clock *fakeClock) *Client {
-	c := New(f.URL, testClientID, testClientSecret, nil)
+	c := New(f.URL, testClientID, testClientSecret, nil, discard)
 	c.clock = clock
 	return c
 }
@@ -194,6 +203,40 @@ func TestTokenIsReissuedFiveMinutesBeforeExpiry(t *testing.T) {
 	want := []string{"token-1", "token-1", "token-2"}
 	if got := f.Tokens(); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+// Without a usable expires_in, a token is kept for 24 hours rather than
+// reissued for every query, and a warning without the token is logged.
+func TestTokenWithoutExpiryIsKeptFor24Hours(t *testing.T) {
+	for name, expiresIn := range map[string]any{"missing": nil, "zero": 0} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeShopify(t, answer(shopBody))
+			f.mu.Lock()
+			f.expiresIn = expiresIn
+			f.mu.Unlock()
+			clock := newFakeClock()
+			var logs bytes.Buffer
+			c := New(f.URL, testClientID, testClientSecret, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+			c.clock = clock
+
+			mustQuery(t, c)
+			clock.Advance(24*time.Hour - 5*time.Minute - time.Second)
+			mustQuery(t, c)
+			clock.Advance(2 * time.Second)
+			mustQuery(t, c)
+
+			want := []string{"token-1", "token-1", "token-2"}
+			if got := f.Tokens(); fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("tokens sent = %v, want %v", got, want)
+			}
+			if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "expires_in") {
+				t.Errorf("no warning about expires_in logged; logs:\n%s", logs.String())
+			}
+			if strings.Contains(logs.String(), "token-1") {
+				t.Errorf("logs contain the token:\n%s", logs.String())
+			}
+		})
 	}
 }
 
@@ -619,7 +662,7 @@ func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
 
 	t.Run("token request refused", func(t *testing.T) {
 		f := newFakeShopify(t, answer(shopBody))
-		c := New(f.URL, testClientID, "wrong-secret", nil)
+		c := New(f.URL, testClientID, "wrong-secret", nil, discard)
 		_, err := query(t, c)
 		if err == nil || strings.Contains(err.Error(), "wrong-secret") {
 			t.Errorf("error = %v, want one without the secret", err)
@@ -628,7 +671,7 @@ func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
 
 	t.Run("Shopify unreachable", func(t *testing.T) {
 		f := newFakeShopify(t, answer(shopBody))
-		c := New(f.URL, testClientID, testClientSecret, nil)
+		c := New(f.URL, testClientID, testClientSecret, nil, discard)
 		f.Close()
 		_, err := query(t, c)
 		if err == nil || strings.Contains(err.Error(), testClientSecret) {

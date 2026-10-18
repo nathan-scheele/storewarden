@@ -124,7 +124,7 @@ func run() error {
 		return err
 	}
 
-	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second})
+	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second}, logger)
 	srv := &http.Server{
 		Handler:           newHandler(lc, client, *allowWrites, records, logger),
 		ReadHeaderTimeout: 10 * time.Second,
