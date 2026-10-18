@@ -235,6 +235,7 @@ Output:
 | `plan` | Its Shopify plan. |
 | `currency` | Its currency code. |
 | `throttle_status` | Shopify's query cost bucket: `currently_available`, `maximum_available` and `restore_rate` (points per second). Omitted if Shopify didn't report it. |
+| `quota` | The calling Caller's own Quota of that bucket, after this call: `available`, `maximum` and `restore_rate` (points per second). Omitted until Shopify has reported the bucket's limits. See [Rate limits](#rate-limits). |
 
 ### search_products
 
@@ -348,7 +349,7 @@ Before each query, storewarden waits until the bucket should hold the most that 
 
 Every Caller also has its own Quota: a share of the Store's bucket, set with `--quota-share` (default `0.5`, half). A Quota's maximum and refill rate are that share of the limits Shopify reports, so they follow the Store's plan. Until Shopify has reported them, Quotas refuse nothing. A Quota is kept per tailnet node, by its stable ID, so each device and each tagged node has its own. Quotas are kept in memory only and start full when storewarden starts.
 
-Every query sent to Shopify for a Caller is charged to its Quota at that query's maximum cost: Read tools, Dry runs and real writes alike, and a throttled query's retry too. The Quota is checked first, and it never waits. A Caller whose Quota can't cover a query gets a Tool error at once, in the same form, naming its Quota: `retryable: your Quota of the Store's rate limit is used up, so nothing was done. Retry the same call in <wait>`. Other Callers carry on.
+Every query sent to Shopify for a Caller is charged to its Quota at that query's maximum cost: Read tools, Dry runs and real writes alike, and a throttled query's retry too. The Quota is checked first, and it never waits. A Caller whose Quota can't cover a query gets a Tool error at once, in the same form, naming its Quota: `retryable: your Quota of the Store's rate limit is used up, so nothing was done. Retry the same call in <wait>`. Other Callers carry on. `get_shop` shows a Caller its own Quota next to the Store's bucket, so it can pace itself.
 
 ## Threat model
 
