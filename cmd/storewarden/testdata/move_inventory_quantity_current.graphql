@@ -1,0 +1,10 @@
+query GetMovableQuantities($inventoryItemId: ID!, $locationId: ID!) {
+  inventoryItem(id: $inventoryItemId) {
+    inventoryLevel(locationId: $locationId) {
+      quantities(names: ["available", "damaged", "quality_control", "safety_stock"]) {
+        name
+        quantity
+      }
+    }
+  }
+}

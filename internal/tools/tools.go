@@ -47,6 +47,10 @@ var all = []tool{
 		Name:        setInventoryQuantityName,
 		Description: setInventoryQuantityDescription,
 	}, setInventoryQuantity),
+	writeTool(&mcp.Tool{
+		Name:        moveInventoryQuantityName,
+		Description: moveInventoryQuantityDescription,
+	}, moveInventoryQuantity),
 }
 
 // readTool makes a Read tool from its definition and the function that

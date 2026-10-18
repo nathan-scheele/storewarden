@@ -29,6 +29,7 @@ func TestEachToolsMaximumQueryCost(t *testing.T) {
 		{"get_inventory", getInventoryQuery, getInventoryMaxCost, "get_inventory"},
 		{"set_inventory_quantity (dry run)", getAvailableQuantityQuery, getAvailableQuantityMaxCost, "set_inventory_quantity_current"},
 		{"set_inventory_quantity (real write)", setAvailableQuantityMutation, setAvailableQuantityMaxCost, "set_inventory_quantity_applied"},
+		{"move_inventory_quantity (dry run)", getMovableQuantitiesQuery, getMovableQuantitiesMaxCost, "move_inventory_quantity_current"},
 	}
 	for _, tt := range tests {
 		recordedQuery, err := os.ReadFile(fixtures + tt.fixture + ".graphql")
@@ -64,7 +65,7 @@ func TestEachToolsMaximumQueryCost(t *testing.T) {
 
 // Access scopes stop short of customers and orders, and so do the queries.
 func TestNoToolQueriesCustomersOrOrders(t *testing.T) {
-	for _, query := range []string{getShopQuery, searchProductsQuery, getProductQuery, getInventoryQuery, getAvailableQuantityQuery, setAvailableQuantityMutation} {
+	for _, query := range []string{getShopQuery, searchProductsQuery, getProductQuery, getInventoryQuery, getAvailableQuantityQuery, setAvailableQuantityMutation, getMovableQuantitiesQuery} {
 		lower := strings.ToLower(query)
 		if strings.Contains(lower, "customer") || strings.Contains(lower, "order") {
 			t.Errorf("query mentions customers or orders:\n%s", query)
