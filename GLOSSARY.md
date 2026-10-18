@@ -35,8 +35,12 @@ _Avoid_: preview, simulation, plan
 A Caller-chosen value attached to a real write. If the same write is retried with the same key, it takes effect only once.
 _Avoid_: request ID, nonce
 
+**Inventory state**:
+One of the named quantities an inventory item has at a location, such as available, damaged, quality control or safety stock.
+_Avoid_: quantity name (Shopify's word), status, bucket
+
 **Expected quantity**:
-The quantity the Caller believes is current when it asks for a change. If the Store disagrees, the write is rejected.
+The quantity the Caller believes is current in an Inventory state when it asks for a change. A change that touches two Inventory states has one for each. If the Store disagrees, the write is rejected.
 _Avoid_: old value, compare value
 
 ### Permission
@@ -48,6 +52,10 @@ _Avoid_: write flag, unsafe mode
 **Grant**:
 A rule in the tailnet policy file that lets matching Callers use specific named Tools.
 _Avoid_: permission, role, scope
+
+**Quota**:
+The share of the Store's rate limit that one Caller may use. Every Caller has its own Quota, and all of them are set by the same instance-wide setting.
+_Avoid_: rate limit (that's Shopify's, shared by all Callers), throttle, budget
 
 **Access scope**:
 A Shopify permission held by storewarden's own credentials. Together they set the limit on what any Tool can reach.
