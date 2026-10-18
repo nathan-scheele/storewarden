@@ -313,3 +313,46 @@ func TestDryRunAtALocationThatDoesNotStockTheItemIsAToolError(t *testing.T) {
 		t.Errorf("error = %q, want %q", got, want)
 	}
 }
+
+func TestWriteAuditRecordsShowDryRunAndIdempotencyKey(t *testing.T) {
+	dryRun := map[string]any{"inventory_item_id": testInventoryItem, "location_id": testLocation, "quantity": 49}
+	// A key given with a Dry run is recorded too, as the Caller sent it.
+	dryRunWithKey := map[string]any{"inventory_item_id": testInventoryItem, "location_id": testLocation, "quantity": 49, "idempotency_key": testKey}
+	tests := map[string]struct {
+		args map[string]any
+		want map[string]any
+	}{
+		"dry run by default": {dryRun, map[string]any{"dry_run": true, "idempotency_key": ""}},
+		"dry run with a key": {dryRunWithKey, map[string]any{"dry_run": true, "idempotency_key": testKey}},
+		"real write":         {realWrite(), map[string]any{"dry_run": false, "idempotency_key": testKey}},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, grantedTo(inventoryWriter))
+			h.answerMutation(t, "set_inventory_quantity_applied")
+			callTool(t, h.connect(t), "set_inventory_quantity", tt.args)
+
+			recs := h.audit.records(t)
+			if len(recs) != 2 {
+				t.Fatalf("got %d audit records, want attempt and result:\n%s", len(recs), h.audit)
+			}
+			for _, rec := range recs {
+				checkFields(t, rec, tt.want)
+			}
+		})
+	}
+}
+
+func TestRealWriteIsRefusedWhenAttemptCantBeRecorded(t *testing.T) {
+	h := newWriteHarness(t, grantedTo(inventoryWriter))
+	h.answerMutation(t, "set_inventory_quantity_applied")
+	h.audit.failOn("attempt")
+
+	res, err := h.connect(t).CallTool(t.Context(), &mcp.CallToolParams{Name: "set_inventory_quantity", Arguments: realWrite()})
+	if err == nil && !res.IsError {
+		t.Fatalf("write succeeded without an attempt record: %+v", res.StructuredContent)
+	}
+	if n := h.store.queries.Load(); n != 0 {
+		t.Errorf("Shopify got %d queries for an unaudited write", n)
+	}
+}
