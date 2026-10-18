@@ -342,35 +342,56 @@ check_warned()      { check_granted && logged "$MARK" WARN delete_everything; }
 check_typo_denied() { smoke_check; [[ "$(smoke_get mcp)" == 403 ]] && logged "$MARK" ERROR "unknown field"; }
 check_no_cap()      { smoke_check; [[ "$(smoke_get mcp)" == 403 ]] && logged "$MARK" INFO "no $CAP capability"; }
 
-# show_policy VALUE prints the policy fragment, with VALUE as the
-# storewarden capability value.
-show_policy() {
-  printf '%s' "$BOLD"
+# policy_file VALUE prints a whole policy file for the personal tailnet, with
+# VALUE as the storewarden capability value. With no VALUE, the test Caller's
+# grant has no app capability at all.
+policy_file() {
+  local app=""
+  if [[ -n "${1:-}" ]]; then
+    app=$(printf ',\n      "app": {\n        "%s": [%s]\n      }' "$CAP" "$1")
+  fi
   cat <<EOF
-
-    "tagOwners": {
-      "tag:storewarden":       ["autogroup:admin"],
-      "tag:storewarden-smoke": ["autogroup:admin"],
+// storewarden smoke test (scripts/smoke-tailnet.sh).
+// This is the whole policy file: paste it over everything that's there.
+{
+  "tagOwners": {
+    "tag:storewarden":       ["autogroup:admin"],
+    "tag:storewarden-smoke": ["autogroup:admin"],
+  },
+  "grants": [
+    // Tailscale's default: every device can reach every other device.
+    {"src": ["*"], "dst": ["*"], "ip": ["*"]},
+    // The test Caller may reach storewarden on port 80, and use its Tools.
+    {
+      "src": ["tag:storewarden-smoke"],
+      "dst": ["tag:storewarden"],
+      "ip":  ["tcp:80"]$app
     },
-    "grants": [
-      {
-        "src": ["tag:storewarden-smoke"],
-        "dst": ["tag:storewarden"],
-        "ip":  ["tcp:80"],
-        "app": {
-          "$CAP": [
-            $1
-          ]
-        }
-      }
-    ]
-
+  ],
+}
 EOF
-  printf '%s' "$RESET"
 }
 
-# show_value VALUE prints just the capability line to change.
-show_value() { printf '\n      %s"%s": [%s]%s\n\n' "$BOLD" "$CAP" "$1" "$RESET"; }
+# show_policy [VALUE] prints the whole policy file and copies it to the
+# clipboard, where there is one.
+show_policy() {
+  local policy
+  policy=$(policy_file "${1:-}")
+  printf '\n%s%s%s\n\n' "$BOLD" "$policy" "$RESET"
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s\n' "$policy" | pbcopy
+    printf '  %s✓ copied to your clipboard%s\n' "$GREEN" "$RESET"
+  fi
+}
+
+# edit_policy WHAT [VALUE] walks through replacing the policy file.
+edit_policy() {
+  visit "$ADMIN/acls/file"
+  step "$1"
+  step "Select everything in the policy file, paste this over it, then Save:"
+  show_policy "${2:-}"
+  pause "Saved? Press Enter"
+}
 
 run_wizard() {
 
@@ -423,11 +444,11 @@ pause "In your personal admin console? Press Enter"
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
 stage "Grant get_shop in the personal tailnet policy"
-visit "$ADMIN/acls/file"
-step "Merge this into the policy file, keeping what's already there, then Save:"
-show_policy '{"tools": ["get_shop"]}'
-note "ip lets traffic reach port 80; app grants the Tool. You need both."
-pause "Saved? Press Enter"
+warn "This replaces your personal tailnet's whole policy file. If it has rules"
+warn "you want to keep, copy them somewhere first."
+note "The test Caller's grant needs both parts: ip lets traffic reach port 80,"
+note "and app grants the Tool."
+edit_policy "Grant the test Caller get_shop." '{"tools": ["get_shop"]}'
 
 # ── 4 ─────────────────────────────────────────────────────────────────────
 stage "Auth key for the storewarden node"
@@ -581,10 +602,7 @@ pause
 # ── 10 ────────────────────────────────────────────────────────────────────
 stage "Unknown Tool → warning"
 MARK=$(log_lines)
-visit "$ADMIN/acls/file"
-step "Add a Tool storewarden doesn't have to the storewarden value, then Save:"
-show_value '{"tools": ["get_shop", "delete_everything"]}'
-pause "Saved? Press Enter"
+edit_policy "Add a Tool storewarden doesn't have (delete_everything)." '{"tools": ["get_shop", "delete_everything"]}'
 if poll 120 check_warned; then record PASS "unknown Tool name logs a warning; get_shop still granted"
 else record FAIL "unknown Tool name logs a warning; get_shop still granted"; fi
 pause
@@ -592,10 +610,7 @@ pause
 # ── 11 ────────────────────────────────────────────────────────────────────
 stage "Typo → deny"
 MARK=$(log_lines)
-visit "$ADMIN/acls/file"
-step "Rename \"tools\" to \"tool\" in the storewarden value, then Save:"
-show_value '{"tool": ["get_shop"]}'
-pause "Saved? Press Enter"
+edit_policy "Make a typo: \"tool\" instead of \"tools\"." '{"tool": ["get_shop"]}'
 if poll 120 check_typo_denied; then record PASS "unknown field in a Grant → 403 and an ERROR log"
 else record FAIL "unknown field in a Grant → 403 and an ERROR log"; fi
 pause
@@ -603,16 +618,12 @@ pause
 # ── 12 ────────────────────────────────────────────────────────────────────
 stage "No Grant → 403"
 MARK=$(log_lines)
-visit "$ADMIN/acls/file"
-step "Delete the whole \"app\" block from the grant. Keep src, dst and ip. Then Save."
-pause "Saved? Press Enter"
+edit_policy "Take away the app capability; the grant keeps only ip."
 if poll 120 check_no_cap; then record PASS "no capability → 403"
 else record FAIL "no capability → 403"; fi
 if check_healthy; then record PASS "/healthz works without a capability"
 else record FAIL "/healthz works without a capability"; fi
-step "Now put the grant back as it was at the start, then Save:"
-show_policy '{"tools": ["get_shop"]}'
-pause "Saved? Press Enter"
+edit_policy "Put get_shop back." '{"tools": ["get_shop"]}'
 if poll 120 check_granted; then record PASS "get_shop granted again"
 else record FAIL "get_shop granted again"; fi
 pause
