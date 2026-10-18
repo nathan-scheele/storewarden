@@ -39,6 +39,7 @@ const (
 // SearchProductsInput is search_products' input.
 type SearchProductsInput struct {
 	Query string `json:"query,omitempty" jsonschema:"Shopify product search syntax, such as title:snowboard or tag:winter status:active. Empty matches every product."`
+	// A pointer, so that a page size of 0 is rejected rather than taken as unset.
 	First *int   `json:"first,omitempty" jsonschema:"page size, from 1 to 50; the default is 10"`
 	After string `json:"after,omitempty" jsonschema:"next_cursor from the previous page, to get the page after it"`
 }
@@ -60,6 +61,19 @@ type ProductSummary struct {
 
 func searchProducts(client *shopify.Client) mcp.ToolHandlerFor[SearchProductsInput, ProductSearch] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in SearchProductsInput) (*mcp.CallToolResult, ProductSearch, error) {
+		first := defaultPageSize
+		if in.First != nil {
+			first = *in.First
+		}
+		if first < 1 || first > maxPageSize {
+			return nil, ProductSearch{}, fmt.Errorf("first must be from 1 to %d, not %d", maxPageSize, first)
+		}
+		// Shopify wants null, not "", for the first page.
+		var after any
+		if in.After != "" {
+			after = in.After
+		}
+
 		var data struct {
 			Products struct {
 				Nodes []struct {
@@ -74,18 +88,6 @@ func searchProducts(client *shopify.Client) mcp.ToolHandlerFor[SearchProductsInp
 					EndCursor   string `json:"endCursor"`
 				} `json:"pageInfo"`
 			} `json:"products"`
-		}
-		first := defaultPageSize
-		if in.First != nil {
-			first = *in.First
-		}
-		if first < 1 || first > maxPageSize {
-			return nil, ProductSearch{}, fmt.Errorf("first must be from 1 to %d, not %d", maxPageSize, first)
-		}
-		// Shopify wants null, not "", for the first page.
-		var after any
-		if in.After != "" {
-			after = in.After
 		}
 		variables := map[string]any{"query": in.Query, "first": first, "after": after}
 		if _, err := client.Query(ctx, searchProductsQuery, variables, &data); err != nil {
