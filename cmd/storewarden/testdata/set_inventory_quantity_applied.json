@@ -1,0 +1,21 @@
+{
+  "data": {
+    "inventorySetQuantities": {
+      "inventoryAdjustmentGroup": {
+        "id": "gid://shopify/InventoryAdjustmentGroup/49278940479649"
+      },
+      "userErrors": []
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 10,
+      "actualQueryCost": 10,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19990,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

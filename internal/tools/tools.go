@@ -13,8 +13,14 @@ import (
 // readOnly annotates a Read tool.
 var readOnly = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
-// Register adds the Tools to s and returns their names.
-func Register(s *mcp.Server, client *shopify.Client) []string {
+// destructive annotates a Write tool. DestructiveHint is a *bool, so that
+// "unset" differs from false; new(true) makes a *bool that points at true.
+var destructive = &mcp.ToolAnnotations{DestructiveHint: new(true), IdempotentHint: true}
+
+// Register adds the Tools to s: the Read tools always, and the Write tool
+// only in Write mode. It returns every Tool's name, mapped to whether it
+// was added.
+func Register(s *mcp.Server, client *shopify.Client, writeMode bool) map[string]bool {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_shop",
 		Description: "Get the Store's name, myshopify domain, plan and currency, and Shopify's current rate limit status.",
@@ -35,7 +41,20 @@ func Register(s *mcp.Server, client *shopify.Client) []string {
 		Description: "Get an inventory item's available and on-hand quantities at each location that stocks it, up to 100 locations.",
 		Annotations: readOnly,
 	}, getInventory(client))
-	return []string{"get_shop", "search_products", "get_product", "get_inventory"}
+	if writeMode {
+		mcp.AddTool(s, &mcp.Tool{
+			Name:        setInventoryQuantityName,
+			Description: setInventoryQuantityDescription,
+			Annotations: destructive,
+		}, setInventoryQuantity(client))
+	}
+	return map[string]bool{
+		"get_shop":               true,
+		"search_products":        true,
+		"get_product":            true,
+		"get_inventory":          true,
+		setInventoryQuantityName: writeMode,
+	}
 }
 
 // getShopMaxCost is the most getShopQuery can cost, in Shopify's query cost

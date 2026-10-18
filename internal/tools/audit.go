@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -44,8 +45,11 @@ func Audited(log *audit.Log) mcp.Middleware {
 				Tool:      params.Name,
 				Args:      params.Arguments,
 				Decision:  audit.Allow,
-				// DryRun and IdempotencyKey stay empty: Read tools have
-				// neither. A Write tool fills them in here from Args.
+				// DryRun and IdempotencyKey stay empty for Read tools,
+				// which have neither.
+			}
+			if params.Name == setInventoryQuantityName {
+				rec.DryRun, rec.IdempotencyKey = writeArgs(params.Arguments)
 			}
 			if err := log.Write(rec); err != nil {
 				return nil, errNotAudited
@@ -67,6 +71,21 @@ func Audited(log *audit.Log) mcp.Middleware {
 			return res, err
 		}
 	}
+}
+
+// writeArgs returns whether a Write tool call is a Dry run, and the
+// Idempotency key it was given, from the arguments the Caller sent. The
+// arguments haven't been validated yet; if they can't be read, the call is
+// taken as a Dry run, which is what the Tool will treat it as or refuse.
+func writeArgs(args json.RawMessage) (dryRun bool, idempotencyKey string) {
+	var in struct {
+		DryRun         *bool  `json:"dry_run"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return true, ""
+	}
+	return isDryRun(in.DryRun), in.IdempotencyKey
 }
 
 // outcome describes how a call ended, for the result record.

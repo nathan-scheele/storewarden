@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -110,6 +111,14 @@ type fakeShopify struct {
 
 	mu       sync.Mutex
 	fixtures []fixture
+	answers  map[string][]byte // query → the response to it, whatever the variables
+	received []graphQLRequest
+}
+
+// graphQLRequest is one GraphQL request the fake Store received.
+type graphQLRequest struct {
+	Query     string
+	Variables map[string]any
 }
 
 func newFakeShopify(t *testing.T) *fakeShopify {
@@ -144,10 +153,15 @@ func newFakeShopify(t *testing.T) *fakeShopify {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		query := strings.TrimSpace(req.Query)
 		store.mu.Lock()
-		var response []byte
+		store.received = append(store.received, graphQLRequest{Query: query, Variables: req.Variables})
+		response := store.answers[query]
 		for _, f := range store.fixtures {
-			if strings.TrimSpace(req.Query) == f.query && reflect.DeepEqual(req.Variables, f.variables) {
+			if response != nil {
+				break
+			}
+			if query == f.query && reflect.DeepEqual(req.Variables, f.variables) {
 				response = f.response
 				break
 			}
@@ -177,6 +191,40 @@ func (s *fakeShopify) replaceInResponses(old, new string) {
 	}
 }
 
+// recorded returns the fixture recorded as name, such as
+// "set_inventory_quantity_stale".
+func (s *fakeShopify) recorded(t *testing.T, name string) fixture {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, f := range s.fixtures {
+		if f.name == filepath.Join("testdata", name) {
+			return f
+		}
+	}
+	t.Fatalf("no fixture named %s", name)
+	return fixture{}
+}
+
+// answer makes the fake Store answer every request for query with
+// response, whatever its variables. A mutation's variables hold the audit
+// request ID, which is new on every call, so no recording matches them.
+func (s *fakeShopify) answer(query string, response []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.answers == nil {
+		s.answers = map[string][]byte{}
+	}
+	s.answers[strings.TrimSpace(query)] = response
+}
+
+// requests returns every GraphQL request the fake Store has received.
+func (s *fakeShopify) requests() []graphQLRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.received)
+}
+
 // syncBuffer is a bytes.Buffer that is safe to write from server goroutines.
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -204,15 +252,26 @@ type harness struct {
 
 // newHarness starts the assembled server handler with the given WhoIs, a
 // fake Shopify, an in-memory audit sink and debug-level JSON logs captured
-// in memory.
+// in memory. Write mode is off.
 func newHarness(t *testing.T, whois authz.WhoIser) *harness {
+	t.Helper()
+	return startHarness(t, whois, false)
+}
+
+// newWriteHarness is newHarness with Write mode on.
+func newWriteHarness(t *testing.T, whois authz.WhoIser) *harness {
+	t.Helper()
+	return startHarness(t, whois, true)
+}
+
+func startHarness(t *testing.T, whois authz.WhoIser, writeMode bool) *harness {
 	t.Helper()
 	logs := &syncBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	store := newFakeShopify(t)
 	client := shopify.New(store.URL, testClientID, testClientSecret, nil)
 	sink := &auditSink{}
-	srv := httptest.NewServer(newHandler(whois, client, audit.New(sink, logger), logger))
+	srv := httptest.NewServer(newHandler(whois, client, writeMode, audit.New(sink, logger), logger))
 	t.Cleanup(srv.Close)
 	return &harness{url: srv.URL, logs: logs, audit: sink, store: store}
 }

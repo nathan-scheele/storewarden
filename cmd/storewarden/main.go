@@ -35,12 +35,13 @@ func main() {
 
 func run() error {
 	var (
-		store    = flag.String("store", "", "the Store's `domain`, <name>.myshopify.com (required)")
-		hostname = flag.String("hostname", "storewarden", "tailnet node `name`")
-		stateDir = flag.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
-		tags     = flag.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
-		auditLog = flag.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
-		debug    = flag.Bool("debug", false, "log at debug level, including tsnet's backend logs")
+		store       = flag.String("store", "", "the Store's `domain`, <name>.myshopify.com (required)")
+		hostname    = flag.String("hostname", "storewarden", "tailnet node `name`")
+		stateDir    = flag.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
+		tags        = flag.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
+		allowWrites = flag.Bool("allow-writes", false, "Write mode: serve the Write tool to Callers granted it")
+		auditLog    = flag.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
+		debug       = flag.Bool("debug", false, "log at debug level, including tsnet's backend logs")
 	)
 	flag.Parse()
 
@@ -125,7 +126,7 @@ func run() error {
 
 	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second})
 	srv := &http.Server{
-		Handler:           newHandler(lc, client, records, logger),
+		Handler:           newHandler(lc, client, *allowWrites, records, logger),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -135,7 +136,7 @@ func run() error {
 	if status.CurrentTailnet != nil {
 		tailnet = status.CurrentTailnet.Name
 	}
-	logger.Info("serving MCP", "store", *store, "hostname", *hostname, "tailnet", tailnet, "tailscale_ips", status.TailscaleIPs)
+	logger.Info("serving MCP", "store", *store, "hostname", *hostname, "tailnet", tailnet, "tailscale_ips", status.TailscaleIPs, "write_mode", *allowWrites)
 
 	select {
 	case err := <-serveErr:
