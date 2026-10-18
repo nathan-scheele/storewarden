@@ -22,9 +22,17 @@ func (e *retryableError) Error() string {
 }
 
 // toolError returns the error the Caller sees for err, which a Tool's
-// handler returned. Shopify's rate limit becomes a retryable error with the
-// throttle's suggested wait. Any other error is returned as it is.
+// handler returned. The Caller's spent Quota and Shopify's rate limit
+// become retryable errors with the suggested wait, each worded so the
+// Caller can tell which it was. Any other error is returned as it is.
 func toolError(err error) error {
+	var spent *shopify.QuotaError
+	if errors.As(err, &spent) {
+		return &retryableError{
+			reason: "your Quota of the Store's rate limit is used up, so nothing was done",
+			wait:   spent.Wait,
+		}
+	}
 	var throttled *shopify.ThrottledError
 	if errors.As(err, &throttled) {
 		return &retryableError{
