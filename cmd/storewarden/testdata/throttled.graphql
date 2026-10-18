@@ -1,6 +1,6 @@
 # A query whose actual cost is as high as its requested cost, 990, whatever
-# the Store holds. Run together with dozens of copies of itself, it drains
-# the cost bucket until Shopify throttles it.
+# the Store holds. scripts/record-throttled.sh sends dozens of copies of it
+# at once to drain the cost bucket until Shopify throttles it.
 query {
   s1: shop { id } s2: shop { id } s3: shop { id } s4: shop { id } s5: shop { id } s6: shop { id } s7: shop { id } s8: shop { id } s9: shop { id } s10: shop { id }
   s11: shop { id } s12: shop { id } s13: shop { id } s14: shop { id } s15: shop { id } s16: shop { id } s17: shop { id } s18: shop { id } s19: shop { id } s20: shop { id }

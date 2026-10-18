@@ -414,7 +414,7 @@ func costBody(available float64) string {
 }
 
 // throttledFixture is the path of a real THROTTLED response from the dev
-// store, recorded by scripts/record-fixture.sh.
+// store, recorded by scripts/record-throttled.sh.
 const throttledFixture = "../../cmd/storewarden/testdata/throttled.json"
 
 // throttledBody is a THROTTLED response for a query whose requested cost is
