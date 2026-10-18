@@ -484,8 +484,10 @@ work=$(mktemp -d)
 LOG="$work/storewarden.log"
 SMOKE_LOG="$work/storewarden-smoke.log"
 say "Building storewarden and the test Caller…"
-go build -o "$work/storewarden" ./cmd/storewarden
-go build -o "$work/storewarden-smoke" ./cmd/storewarden-smoke
+# ts_omit_peerapiserver keeps tsnet's peer API off the host's interfaces
+# (docs/adr/0003-build-without-the-peer-api-server.md).
+go build -tags ts_omit_peerapiserver -o "$work/storewarden" ./cmd/storewarden
+go build -tags ts_omit_peerapiserver -o "$work/storewarden-smoke" ./cmd/storewarden-smoke
 # Secrets reach the processes through their environment, never their arguments.
 (
   export SHOPIFY_CLIENT_ID SHOPIFY_CLIENT_SECRET

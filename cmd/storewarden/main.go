@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/tsnet"
 
 	"github.com/nathan-scheele/storewarden/internal/shopify"
@@ -48,6 +49,11 @@ func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger) // also sends the standard log package's output to logger
 
+	// Built in, tsnet's peer API listens on every host interface
+	// (docs/adr/0003-build-without-the-peer-api-server.md).
+	if buildfeatures.HasPeerAPIServer {
+		return errors.New("storewarden must be built with -tags ts_omit_peerapiserver")
+	}
 	if !isStoreDomain(*store) {
 		return fmt.Errorf("--store must be <name>.myshopify.com, got %q", *store)
 	}
