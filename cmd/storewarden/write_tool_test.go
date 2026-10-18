@@ -124,6 +124,113 @@ func TestSetInventoryQuantityIsADryRunByDefault(t *testing.T) {
 	}
 }
 
+// testKey is the Idempotency key the tests' real writes use.
+const testKey = "5a1d7e2b-8c3f-4a6e-9d0b-2c4e6f8a1b02"
+
+// realWrite returns the arguments of a real write of 49 where 50 is
+// expected.
+func realWrite() map[string]any {
+	return map[string]any{
+		"inventory_item_id": testInventoryItem,
+		"location_id":       testLocation,
+		"quantity":          49,
+		"dry_run":           false,
+		"idempotency_key":   testKey,
+		"expected_quantity": 50,
+	}
+}
+
+func TestRealWriteNeedsAKeyAndAnExpectedQuantity(t *testing.T) {
+	tests := map[string]struct {
+		change func(args map[string]any)
+		want   string
+	}{
+		"no key":          {func(a map[string]any) { delete(a, "idempotency_key") }, "idempotency_key is required when dry_run is false"},
+		"empty key":       {func(a map[string]any) { a["idempotency_key"] = "" }, "idempotency_key is required when dry_run is false"},
+		"blank key":       {func(a map[string]any) { a["idempotency_key"] = "  " }, "idempotency_key is required when dry_run is false"},
+		"long key":        {func(a map[string]any) { a["idempotency_key"] = strings.Repeat("k", 256) }, "idempotency_key must be at most 255 characters"},
+		"no expected":     {func(a map[string]any) { delete(a, "expected_quantity") }, "expected_quantity is required when dry_run is false"},
+		"neither":         {func(a map[string]any) { delete(a, "idempotency_key"); delete(a, "expected_quantity") }, "idempotency_key is required when dry_run is false"},
+		"negative amount": {func(a map[string]any) { a["quantity"] = -1 }, "quantity must be 0 or more"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, grantedTo(inventoryWriter))
+			args := realWrite()
+			tt.change(args)
+
+			got := callToolError(t, h.connect(t), "set_inventory_quantity", args)
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("error = %q, want it to say %q", got, tt.want)
+			}
+			if n := h.store.queries.Load(); n != 0 {
+				t.Errorf("Shopify got %d queries, want none", n)
+			}
+		})
+	}
+}
+
+// answerMutation makes the fake Store answer the Write tool's mutation with
+// the response recorded as name.
+func (h *harness) answerMutation(t *testing.T, name string) {
+	t.Helper()
+	f := h.store.recorded(t, name)
+	h.store.answer(f.query, f.response)
+}
+
+func TestRealWriteSendsTheKeyAndExpectedQuantityToShopify(t *testing.T) {
+	h := newWriteHarness(t, grantedTo(inventoryWriter))
+	h.answerMutation(t, "set_inventory_quantity_applied")
+
+	got := callTool(t, h.connect(t), "set_inventory_quantity", realWrite())
+	recs := h.audit.records(t)
+	if len(recs) == 0 {
+		t.Fatal("no audit records")
+	}
+	requestID := recs[0]["request_id"].(string)
+	want := map[string]any{
+		"dry_run":    false,
+		"current":    50.0, // Shopify checked it was expected_quantity
+		"new":        49.0,
+		"applied":    true,
+		"request_id": requestID,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("set_inventory_quantity =\n%v\nwant\n%v", got, want)
+	}
+
+	mutations := h.store.mutations()
+	if len(mutations) != 1 {
+		t.Fatalf("Shopify received %d mutations, want 1", len(mutations))
+	}
+	m := mutations[0]
+	// The fixed parts of the change are in the mutation's text.
+	for _, part := range []string{
+		"inventorySetQuantities(",
+		`name: "available"`,
+		`reason: "correction"`,
+		"referenceDocumentUri: $referenceDocumentUri",
+		"changeFromQuantity: $expectedQuantity",
+		"@idempotent(key: $idempotencyKey)",
+		"$expectedQuantity: Int!", // never null, so the compare-and-swap check always runs
+	} {
+		if !strings.Contains(m.Query, part) {
+			t.Errorf("mutation has no %q:\n%s", part, m.Query)
+		}
+	}
+	wantVars := map[string]any{
+		"inventoryItemId":      testInventoryItem,
+		"locationId":           testLocation,
+		"quantity":             49.0,
+		"expectedQuantity":     50.0,
+		"idempotencyKey":       testKey,
+		"referenceDocumentUri": "storewarden://audit/" + requestID,
+	}
+	if !reflect.DeepEqual(m.Variables, wantVars) {
+		t.Errorf("mutation variables =\n%v\nwant\n%v", m.Variables, wantVars)
+	}
+}
+
 func TestDryRunAtALocationThatDoesNotStockTheItemIsAToolError(t *testing.T) {
 	cs := newWriteHarness(t, grantedTo(inventoryWriter)).connect(t)
 

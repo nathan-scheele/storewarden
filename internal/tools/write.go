@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -35,13 +36,76 @@ const getAvailableQuantityQuery = `query GetAvailableQuantity($inventoryItemId: 
   }
 }`
 
+// setAvailableQuantityMaxCost is the most setAvailableQuantityMutation can
+// cost.
+const setAvailableQuantityMaxCost = 10
+
+// setAvailableQuantityMutation makes a real write
+// (docs/adr/0002-write-tools-only-where-shopify-enforces-idempotency.md).
+// The quantity name and reason are fixed here, not taken from the Caller.
+// $expectedQuantity is Int!, so changeFromQuantity is never null and
+// Shopify always runs its compare-and-swap check. @idempotent hands the
+// Caller's Idempotency key to Shopify, which applies a retry only once.
+const setAvailableQuantityMutation = `mutation SetAvailableQuantity($inventoryItemId: ID!, $locationId: ID!, $quantity: Int!, $expectedQuantity: Int!, $referenceDocumentUri: String!, $idempotencyKey: String!) {
+  inventorySetQuantities(
+    input: {
+      name: "available"
+      reason: "correction"
+      referenceDocumentUri: $referenceDocumentUri
+      quantities: [
+        {
+          inventoryItemId: $inventoryItemId
+          locationId: $locationId
+          quantity: $quantity
+          changeFromQuantity: $expectedQuantity
+        }
+      ]
+    }
+  ) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup {
+      id
+    }
+    userErrors {
+      field
+      message
+      code
+    }
+  }
+}`
+
 // SetInventoryQuantityInput is set_inventory_quantity's input.
 type SetInventoryQuantityInput struct {
 	InventoryItemID string `json:"inventory_item_id" jsonschema:"the inventory item's ID, such as gid://shopify/InventoryItem/123, from get_product"`
 	LocationID      string `json:"location_id" jsonschema:"the location's ID, such as gid://shopify/Location/123, from get_inventory"`
 	Quantity        int    `json:"quantity" jsonschema:"the new available quantity, 0 or more"`
 	// A pointer, so that a missing dry_run can mean true.
-	DryRun *bool `json:"dry_run,omitempty" jsonschema:"true (the default) only reports the change; false makes it"`
+	DryRun         *bool  `json:"dry_run,omitempty" jsonschema:"true (the default) only reports the change; false makes it"`
+	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"required when dry_run is false: up to 255 characters, new for each change and the same when retrying it; a UUID is a good choice"`
+	// A pointer, so that 0 differs from missing.
+	ExpectedQuantity *int `json:"expected_quantity,omitempty" jsonschema:"required when dry_run is false: the available quantity you believe is current, from a dry run"`
+}
+
+// maxIdempotencyKeyLength is the longest Idempotency key a Caller may give.
+const maxIdempotencyKeyLength = 255
+
+// isDryRun reports whether a call with this dry_run argument is a Dry run:
+// every call is, unless the Caller says false.
+func isDryRun(dryRun *bool) bool {
+	return dryRun == nil || *dryRun
+}
+
+// checkRealWrite returns an error unless in has what a real write needs.
+func checkRealWrite(in SetInventoryQuantityInput) error {
+	if strings.TrimSpace(in.IdempotencyKey) == "" {
+		return errors.New("idempotency_key is required when dry_run is false")
+	}
+	if len(in.IdempotencyKey) > maxIdempotencyKeyLength {
+		return fmt.Errorf("idempotency_key must be at most %d characters", maxIdempotencyKeyLength)
+	}
+	if in.ExpectedQuantity == nil {
+		return errors.New("expected_quantity is required when dry_run is false; run a dry run to see the current quantity")
+	}
+	return nil
 }
 
 // InventoryChange is set_inventory_quantity's output.
@@ -63,6 +127,23 @@ func setInventoryQuantity(client *shopify.Client) mcp.ToolHandlerFor[SetInventor
 		}
 		if in.Quantity < 0 {
 			return nil, InventoryChange{}, fmt.Errorf("quantity must be 0 or more, not %d", in.Quantity)
+		}
+		if !isDryRun(in.DryRun) {
+			if err := checkRealWrite(in); err != nil {
+				return nil, InventoryChange{}, err
+			}
+			if err := setAvailableQuantity(ctx, client, in); err != nil {
+				return nil, InventoryChange{}, err
+			}
+			// Shopify's compare-and-swap check passed, so the quantity
+			// before the change was the expected one.
+			return nil, InventoryChange{
+				DryRun:    false,
+				Current:   *in.ExpectedQuantity,
+				New:       in.Quantity,
+				Applied:   true,
+				RequestID: audit.RequestID(ctx),
+			}, nil
 		}
 		current, err := availableQuantity(ctx, client, in.InventoryItemID, in.LocationID)
 		if err != nil {
@@ -109,4 +190,23 @@ func availableQuantity(ctx context.Context, client *shopify.Client, item, locati
 		}
 	}
 	return 0, errors.New("shopify reported no available quantity")
+}
+
+// setAvailableQuantity makes a real write of in, which checkRealWrite has
+// passed. Shopify's inventory history links the change back to this call's
+// Audit records through the reference document URI.
+func setAvailableQuantity(ctx context.Context, client *shopify.Client, in SetInventoryQuantityInput) error {
+	variables := map[string]any{
+		"inventoryItemId":      in.InventoryItemID,
+		"locationId":           in.LocationID,
+		"quantity":             in.Quantity,
+		"expectedQuantity":     *in.ExpectedQuantity,
+		"referenceDocumentUri": "storewarden://audit/" + audit.RequestID(ctx),
+		"idempotencyKey":       in.IdempotencyKey,
+	}
+	// The Tool needs nothing from the response: Query returns Shopify's
+	// user errors as an error, and no error means the change was made.
+	var data struct{}
+	_, err := client.Query(ctx, setAvailableQuantityMutation, variables, &data)
+	return err
 }
