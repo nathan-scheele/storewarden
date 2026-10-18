@@ -21,8 +21,8 @@ func (e *ThrottledError) Error() string {
 
 // bucket mirrors the Store's query cost bucket, so the client can wait for
 // capacity instead of having Shopify throttle it. Shopify refills the bucket
-// at rate points a second, up to maximum. Nothing here is hardcoded: the
-// limits and each query's cost come from Shopify's responses.
+// at rate points a second, up to maximum. The limits are never hardcoded:
+// they come from Shopify's responses.
 type bucket struct {
 	mu        sync.Mutex
 	known     bool      // false until a response reports throttle status; until then the bucket counts as full
@@ -30,18 +30,12 @@ type bucket struct {
 	maximum   float64   // maximumAvailable
 	rate      float64   // restoreRate, points per second
 	at        time.Time // when available was last set
-
-	// costs holds the largest requestedQueryCost Shopify has reported for
-	// each query document. That is Shopify's own estimate of the most the
-	// query can cost, so it is what the client waits for. A query Shopify
-	// hasn't costed yet is sent without waiting.
-	costs map[string]float64
 }
 
 // record updates the bucket from a response's cost report. The report
 // replaces whatever the bucket has worked out since, including reservations
 // for queries still in flight, because Shopify's figure is the true one.
-func (b *bucket) record(now time.Time, query string, cost *Cost) {
+func (b *bucket) record(now time.Time, cost *Cost) {
 	if cost == nil {
 		return
 	}
@@ -53,40 +47,36 @@ func (b *bucket) record(now time.Time, query string, cost *Cost) {
 	b.maximum = t.MaximumAvailable
 	b.rate = t.RestoreRate
 	b.at = now
-	if b.costs == nil {
-		b.costs = map[string]float64{}
-	}
-	b.costs[query] = max(b.costs[query], cost.RequestedQueryCost)
 }
 
-// take reserves query's cost and returns how long to wait before sending
-// it. If deadline isn't zero and the wait would end after it, take reserves
-// nothing and returns the wait with ok false.
-func (b *bucket) take(now time.Time, query string, deadline time.Time) (wait time.Duration, ok bool) {
+// take reserves cost points and returns how long to wait before sending the
+// query. If deadline isn't zero and the wait would end after it, take
+// reserves nothing and returns the wait with ok false.
+func (b *bucket) take(now time.Time, cost float64, deadline time.Time) (wait time.Duration, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.known {
 		return 0, true
 	}
-	wait = b.waitLocked(now, query)
+	wait = b.waitLocked(now, cost)
 	if !deadline.IsZero() && now.Add(wait).After(deadline) {
 		return wait, false
 	}
 	// Spend the points now, so callers arriving meanwhile queue behind this
 	// one. The bucket may go below zero: that is capacity already promised.
-	b.available = b.currentLocked(now) - b.costLocked(query)
+	b.available = b.currentLocked(now) - b.capLocked(cost)
 	b.at = now
 	return wait, true
 }
 
-// wait returns how long until the bucket holds enough for query.
-func (b *bucket) wait(now time.Time, query string) time.Duration {
+// wait returns how long until the bucket holds cost points.
+func (b *bucket) wait(now time.Time, cost float64) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.known {
 		return 0
 	}
-	return b.waitLocked(now, query)
+	return b.waitLocked(now, cost)
 }
 
 // currentLocked returns the points in the bucket at now, counting the refill.
@@ -95,16 +85,16 @@ func (b *bucket) currentLocked(now time.Time) float64 {
 	return min(refilled, b.maximum)
 }
 
-// costLocked returns what query is expected to cost. It is never more than
-// a full bucket, so waiting for it always ends.
-func (b *bucket) costLocked(query string) float64 {
-	return min(b.costs[query], b.maximum)
+// capLocked returns cost, but never more than a full bucket, so waiting for
+// it always ends.
+func (b *bucket) capLocked(cost float64) float64 {
+	return min(cost, b.maximum)
 }
 
-// waitLocked returns how long until the bucket holds enough for query,
-// rounded up to the millisecond.
-func (b *bucket) waitLocked(now time.Time, query string) time.Duration {
-	short := b.costLocked(query) - b.currentLocked(now)
+// waitLocked returns how long until the bucket holds cost points, rounded
+// up to the millisecond.
+func (b *bucket) waitLocked(now time.Time, cost float64) time.Duration {
+	short := b.capLocked(cost) - b.currentLocked(now)
 	if short <= 0 || b.rate <= 0 {
 		return 0
 	}
@@ -112,11 +102,11 @@ func (b *bucket) waitLocked(now time.Time, query string) time.Duration {
 	return time.Duration(millis) * time.Millisecond
 }
 
-// waitForCapacity waits until the bucket can serve query, or returns a
+// waitForCapacity waits until the bucket holds cost points, or returns a
 // *ThrottledError at once if that wait would outlast ctx's deadline.
-func (c *Client) waitForCapacity(ctx context.Context, query string) error {
+func (c *Client) waitForCapacity(ctx context.Context, cost float64) error {
 	deadline, _ := ctx.Deadline() // the zero time if ctx has no deadline
-	wait, ok := c.bucket.take(c.clock.Now(), query, deadline)
+	wait, ok := c.bucket.take(c.clock.Now(), cost, deadline)
 	if !ok {
 		return &ThrottledError{Wait: wait}
 	}

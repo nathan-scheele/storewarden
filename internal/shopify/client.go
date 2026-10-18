@@ -98,39 +98,39 @@ func WithObserver(ctx context.Context, observe func(*Response)) context.Context 
 	return context.WithValue(ctx, observerKey{}, observe)
 }
 
-// Query runs a GraphQL query and decodes its data into data.
+// Query runs a GraphQL query and decodes its data into data. maxCost is the
+// most the query can cost, in Shopify's query cost points.
 //
-// It first waits for the Store's cost bucket to hold enough for the query,
-// or returns a *ThrottledError at once if that wait would outlast ctx's
-// deadline. If Shopify throttles the query anyway, it is retried once the
+// It first waits for the Store's cost bucket to hold maxCost, or returns a
+// *ThrottledError at once if that wait would outlast ctx's deadline. If Shopify throttles the query anyway, it is retried once the
 // same way. Shopify's errors come back as GraphQLErrors or UserErrors. The
 // Response, when not nil, is from the last request Shopify answered, even
 // if there is an error.
-func (c *Client) Query(ctx context.Context, query string, variables map[string]any, data any) (*Response, error) {
-	resp, err := c.query(ctx, query, variables, data)
+func (c *Client) Query(ctx context.Context, query string, maxCost float64, variables map[string]any, data any) (*Response, error) {
+	resp, err := c.query(ctx, query, maxCost, variables, data)
 	if observe, ok := ctx.Value(observerKey{}).(func(*Response)); ok && resp != nil {
 		observe(resp)
 	}
 	return resp, err
 }
 
-func (c *Client) query(ctx context.Context, query string, variables map[string]any, data any) (*Response, error) {
+func (c *Client) query(ctx context.Context, query string, maxCost float64, variables map[string]any, data any) (*Response, error) {
 	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.queryOnce(ctx, query, body, data)
+	resp, err := c.queryOnce(ctx, maxCost, body, data)
 	if !throttled(err) {
 		return resp, err
 	}
 	// The bucket now holds Shopify's figures from the throttled response,
 	// so the retry waits just long enough.
-	retryResp, err := c.queryOnce(ctx, query, body, data)
+	retryResp, err := c.queryOnce(ctx, maxCost, body, data)
 	if retryResp != nil {
 		resp = retryResp
 	}
 	if throttled(err) {
-		return resp, &ThrottledError{Wait: c.bucket.wait(c.clock.Now(), query)}
+		return resp, &ThrottledError{Wait: c.bucket.wait(c.clock.Now(), maxCost)}
 	}
 	return resp, err
 }
@@ -142,8 +142,8 @@ func throttled(err error) bool {
 }
 
 // queryOnce waits for capacity, then sends one query and decodes the answer.
-func (c *Client) queryOnce(ctx context.Context, query string, body []byte, data any) (*Response, error) {
-	if err := c.waitForCapacity(ctx, query); err != nil {
+func (c *Client) queryOnce(ctx context.Context, maxCost float64, body []byte, data any) (*Response, error) {
+	if err := c.waitForCapacity(ctx, maxCost); err != nil {
 		return nil, err
 	}
 	resp, err := c.post(ctx, body)
@@ -172,7 +172,7 @@ func (c *Client) queryOnce(ctx context.Context, query string, body []byte, data 
 		return meta, fmt.Errorf("shopify: graphql: decoding response: %w", err)
 	}
 	meta.Cost = out.Extensions.Cost
-	c.bucket.record(c.clock.Now(), query, meta.Cost)
+	c.bucket.record(c.clock.Now(), meta.Cost)
 	if len(out.Errors) > 0 {
 		errs := make(GraphQLErrors, len(out.Errors))
 		for i, e := range out.Errors {

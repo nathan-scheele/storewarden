@@ -173,7 +173,7 @@ func availableQuantity(ctx context.Context, client *shopify.Client, item, locati
 		} `json:"inventoryItem"`
 	}
 	variables := map[string]any{"inventoryItemId": item, "locationId": location}
-	if _, err := client.Query(ctx, getAvailableQuantityQuery, variables, &data); err != nil {
+	if _, err := client.Query(ctx, getAvailableQuantityQuery, getAvailableQuantityMaxCost, variables, &data); err != nil {
 		return 0, err
 	}
 	// Shopify answers null for an ID it doesn't know, and for a location
@@ -207,7 +207,7 @@ func setAvailableQuantity(ctx context.Context, client *shopify.Client, in SetInv
 	// The Tool needs nothing from the response: Query returns Shopify's
 	// user errors as an error, and no error means the change was made.
 	var data struct{}
-	_, err := client.Query(ctx, setAvailableQuantityMutation, variables, &data)
+	_, err := client.Query(ctx, setAvailableQuantityMutation, setAvailableQuantityMaxCost, variables, &data)
 	return plainWriteError(err)
 }
 

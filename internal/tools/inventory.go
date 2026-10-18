@@ -69,7 +69,7 @@ func getInventory(client *shopify.Client) mcp.ToolHandlerFor[GetInventoryInput, 
 			} `json:"inventoryItem"`
 		}
 		variables := map[string]any{"id": in.InventoryItemID}
-		if _, err := client.Query(ctx, getInventoryQuery, variables, &data); err != nil {
+		if _, err := client.Query(ctx, getInventoryQuery, getInventoryMaxCost, variables, &data); err != nil {
 			return nil, Inventory{}, err
 		}
 		// Shopify answers null for an ID it doesn't know.

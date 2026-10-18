@@ -90,7 +90,7 @@ func searchProducts(client *shopify.Client) mcp.ToolHandlerFor[SearchProductsInp
 			} `json:"products"`
 		}
 		variables := map[string]any{"query": in.Query, "first": first, "after": after}
-		if _, err := client.Query(ctx, searchProductsQuery, variables, &data); err != nil {
+		if _, err := client.Query(ctx, searchProductsQuery, searchProductsMaxCost, variables, &data); err != nil {
 			return nil, ProductSearch{}, err
 		}
 		out := ProductSearch{Products: []ProductSummary{}}
@@ -181,7 +181,7 @@ func getProduct(client *shopify.Client) mcp.ToolHandlerFor[GetProductInput, Prod
 				} `json:"variants"`
 			} `json:"product"`
 		}
-		if _, err := client.Query(ctx, getProductQuery, map[string]any{"id": in.ID}, &data); err != nil {
+		if _, err := client.Query(ctx, getProductQuery, getProductMaxCost, map[string]any{"id": in.ID}, &data); err != nil {
 			return nil, Product{}, err
 		}
 		// Shopify answers null for an ID it doesn't know.

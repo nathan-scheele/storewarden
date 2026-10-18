@@ -343,7 +343,7 @@ So if you retry a change that may already have gone through, expect either the o
 
 Shopify limits each store with a bucket of query cost points. storewarden keeps one bucket per store and updates it from every response. It never hardcodes the limits.
 
-Before each query, storewarden waits until the bucket should hold enough points for it. If the request has a deadline that the wait would pass, it fails at once with a rate-limit error that says how long to wait. storewarden sets no deadline of its own, so today a call waits. If the Caller disconnects, the wait ends. If Shopify still throttles a query, storewarden waits and retries it once. A second throttle becomes a Tool error: `shopify: rate limited; retry in <wait>`.
+Before each query, storewarden waits until the bucket should hold the most that query can cost. Each Tool's maximum cost is fixed and checked against a recording; `search_products` always counts its cost at the largest page size. If the request has a deadline that the wait would pass, it fails at once with a rate-limit error that says how long to wait. storewarden sets no deadline of its own, so today a call waits. If the Caller disconnects, the wait ends. If Shopify still throttles a query, storewarden waits and retries it once. A second throttle becomes a Tool error: `shopify: rate limited; retry in <wait>`.
 
 ## Threat model
 

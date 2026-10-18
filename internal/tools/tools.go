@@ -58,7 +58,8 @@ func Register(s *mcp.Server, client *shopify.Client, writeMode bool) map[string]
 }
 
 // getShopMaxCost is the most getShopQuery can cost, in Shopify's query cost
-// points. Every Tool's maximum is checked against a recording in cost_test.go.
+// points. Every Tool's maximum is checked against a recording in cost_test.go
+// and passed to the Shopify client, which waits for that much capacity.
 const getShopMaxCost = 2
 
 const getShopQuery = `query GetShop {
@@ -100,7 +101,7 @@ func getShop(client *shopify.Client) mcp.ToolHandlerFor[struct{}, Shop] {
 				} `json:"plan"`
 			} `json:"shop"`
 		}
-		resp, err := client.Query(ctx, getShopQuery, nil, &data)
+		resp, err := client.Query(ctx, getShopQuery, getShopMaxCost, nil, &data)
 		if err != nil {
 			return nil, Shop{}, err
 		}

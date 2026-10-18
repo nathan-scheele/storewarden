@@ -17,6 +17,10 @@ import (
 const (
 	testClientID     = "test-client-id"
 	testClientSecret = "test-client-secret"
+
+	// testQueryCost is the most the tests' queries can cost. costBody and
+	// throttledBody report it as the requested cost.
+	testQueryCost = 100
 )
 
 // fakeClock is a clock that only moves when told to. After moves it forward
@@ -147,7 +151,7 @@ type shopData struct {
 func query(t *testing.T, c *Client) (*Response, error) {
 	t.Helper()
 	var data shopData
-	return c.Query(t.Context(), "query { shop { name } }", nil, &data)
+	return c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data)
 }
 
 func mustQuery(t *testing.T, c *Client) *Response {
@@ -211,7 +215,7 @@ func TestTokenIsReissuedOnceAfter401AndTheRequestRetried(t *testing.T) {
 	c := newTestClient(f, newFakeClock())
 
 	var data shopData
-	if _, err := c.Query(t.Context(), "query { shop { name } }", nil, &data); err != nil {
+	if _, err := c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data); err != nil {
 		t.Fatal(err)
 	}
 	if data.Shop.Name != "storewarden-dev" {
@@ -246,7 +250,7 @@ func concurrently(t *testing.T, c *Client, n int) {
 	for range n {
 		wg.Go(func() {
 			var data shopData
-			_, err := c.Query(t.Context(), "query { shop { name } }", nil, &data)
+			_, err := c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data)
 			errs <- err
 		})
 	}
@@ -303,7 +307,7 @@ func TestUserErrorsAreTypedAndTheDataStillDecoded(t *testing.T) {
 			UserErrors []UserError `json:"userErrors"`
 		} `json:"inventorySetQuantities"`
 	}
-	_, err := c.Query(t.Context(), "mutation { inventorySetQuantities { userErrors { field message code } } }", nil, &data)
+	_, err := c.Query(t.Context(), "mutation { inventorySetQuantities { userErrors { field message code } } }", testQueryCost, nil, &data)
 	var got UserErrors
 	if !errors.As(err, &got) {
 		t.Fatalf("error = %v (%T), want UserErrors", err, err)
@@ -326,7 +330,7 @@ func TestEmptyUserErrorsAreNotAnError(t *testing.T) {
 	c := newTestClient(f, newFakeClock())
 
 	var data map[string]any
-	if _, err := c.Query(t.Context(), "mutation { x }", nil, &data); err != nil {
+	if _, err := c.Query(t.Context(), "mutation { x }", testQueryCost, nil, &data); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -393,7 +397,7 @@ func queryBy(t *testing.T, c *Client, deadline time.Duration) error {
 	ctx, cancel := context.WithTimeout(t.Context(), deadline)
 	defer cancel()
 	var data shopData
-	_, err := c.Query(ctx, "query { shop { name } }", nil, &data)
+	_, err := c.Query(ctx, "query { shop { name } }", testQueryCost, nil, &data)
 	return err
 }
 
@@ -426,6 +430,24 @@ func TestWaitsWhenCapacityRefillsBeforeTheDeadline(t *testing.T) {
 	}
 	if got := len(f.Tokens()); got != 2 {
 		t.Errorf("GraphQL requests = %d, want 2", got)
+	}
+}
+
+func TestWaitsForAQueryTheBucketHasNotSeenBefore(t *testing.T) {
+	// One query leaves 25 points. A different query, never sent before,
+	// can cost up to 100, so it waits 1.5s for the bucket to refill.
+	f := newFakeShopify(t, answer(costBody(25)))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+	mustQuery(t, c)
+
+	var data shopData
+	if _, err := c.Query(t.Context(), "query { shop { id } }", 100, nil, &data); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := clock.Waits(), []time.Duration{1500 * time.Millisecond}; !reflect.DeepEqual(got, want) {
+		t.Errorf("waits = %v, want %v", got, want)
 	}
 }
 
@@ -487,7 +509,7 @@ func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
 	c := newTestClient(f, clock)
 
 	var data shopData
-	resp, err := c.Query(t.Context(), "query { shop { name } }", nil, &data)
+	resp, err := c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data)
 	if err != nil {
 		t.Fatal(err)
 	}
