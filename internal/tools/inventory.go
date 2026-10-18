@@ -9,7 +9,9 @@ import (
 	"github.com/nathan-scheele/storewarden/internal/shopify"
 )
 
-// getInventoryQuery has a maximum query cost of 30.
+// getInventoryMaxCost is the most getInventoryQuery can cost.
+const getInventoryMaxCost = 30
+
 const getInventoryQuery = `query GetInventory($id: ID!) {
   inventoryItem(id: $id) {
     inventoryLevels(first: 100) {

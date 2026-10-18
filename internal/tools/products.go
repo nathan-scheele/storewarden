@@ -9,7 +9,10 @@ import (
 	"github.com/nathan-scheele/storewarden/internal/shopify"
 )
 
-// searchProductsQuery has a maximum query cost of 9, at first = 50.
+// searchProductsMaxCost is the most searchProductsQuery can cost, when first
+// is maxPageSize.
+const searchProductsMaxCost = 9
+
 const searchProductsQuery = `query SearchProducts($query: String!, $first: Int!, $after: String) {
   products(query: $query, first: $first, after: $after) {
     nodes {
@@ -106,7 +109,9 @@ func searchProducts(client *shopify.Client) mcp.ToolHandlerFor[SearchProductsInp
 	}
 }
 
-// getProductQuery has a maximum query cost of 21.
+// getProductMaxCost is the most getProductQuery can cost.
+const getProductMaxCost = 21
+
 const getProductQuery = `query GetProduct($id: ID!) {
   product(id: $id) {
     id

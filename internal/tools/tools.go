@@ -38,7 +38,10 @@ func Register(s *mcp.Server, client *shopify.Client) []string {
 	return []string{"get_shop", "search_products", "get_product", "get_inventory"}
 }
 
-// getShopQuery has a maximum query cost of 2.
+// getShopMaxCost is the most getShopQuery can cost, in Shopify's query cost
+// points. Every Tool's maximum is checked against a recording in cost_test.go.
+const getShopMaxCost = 2
+
 const getShopQuery = `query GetShop {
   shop {
     name

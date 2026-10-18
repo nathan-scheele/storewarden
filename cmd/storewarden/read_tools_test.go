@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -50,6 +51,52 @@ func toolText(res *mcp.CallToolResult) string {
 		return text.Text
 	}
 	return ""
+}
+
+func TestReadToolsAreListedOnlyWhenGranted(t *testing.T) {
+	tests := map[string]struct {
+		grant  string
+		listed []string
+	}{
+		"all":       {readTools, []string{"get_inventory", "get_product", "get_shop", "search_products"}},
+		"catalog":   {`{"tools":["search_products","get_product"]}`, []string{"get_product", "search_products"}},
+		"inventory": {`{"tools":["get_inventory"]}`, []string{"get_inventory"}},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			cs := newHarness(t, grantedTo(tt.grant)).connect(t)
+			res, err := cs.ListTools(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var listed []string
+			for _, tool := range res.Tools {
+				listed = append(listed, tool.Name)
+				if a := tool.Annotations; a == nil || !a.ReadOnlyHint || !a.IdempotentHint {
+					t.Errorf("%s annotations = %+v, want read-only and idempotent", tool.Name, a)
+				}
+			}
+			slices.Sort(listed)
+			if !reflect.DeepEqual(listed, tt.listed) {
+				t.Errorf("tools/list = %v, want %v", listed, tt.listed)
+			}
+		})
+	}
+}
+
+func TestUngrantedReadToolsAreUnknown(t *testing.T) {
+	cs := newHarness(t, grantedTo(`{"tools":["get_shop"]}`)).connect(t)
+	args := map[string]map[string]any{
+		"search_products": {"query": "tag:Snowboard", "first": 2},
+		"get_product":     {"id": "gid://shopify/Product/8803714007201"},
+		"get_inventory":   {"inventory_item_id": "gid://shopify/InventoryItem/50260715896993"},
+	}
+	for name, a := range args {
+		_, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: a})
+		if err == nil || !strings.Contains(err.Error(), "unknown tool") {
+			t.Errorf("%s: err = %v, want unknown tool", name, err)
+		}
+	}
 }
 
 func TestSearchProductsReturnsAPageAndItsCursor(t *testing.T) {
