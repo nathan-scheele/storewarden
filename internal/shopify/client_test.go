@@ -1,6 +1,7 @@
 package shopify
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -348,6 +349,192 @@ func TestRequestIDIsReturned(t *testing.T) {
 	}
 	if resp == nil || resp.RequestID != "request-2" {
 		t.Errorf("response with an error = %+v, want request ID request-2", resp)
+	}
+}
+
+// costBody is a successful response for a query whose requested cost is
+// 100, leaving the bucket with available of its 1000 points, refilling at
+// 50 a second.
+func costBody(available float64) string {
+	return fmt.Sprintf(`{
+	  "data": {"shop": {"name": "storewarden-dev"}},
+	  "extensions": {"cost": {"requestedQueryCost": 100, "actualQueryCost": 100,
+	    "throttleStatus": {"maximumAvailable": 1000.0, "currentlyAvailable": %g, "restoreRate": 50.0}}}
+	}`, available)
+}
+
+// throttledBody is a THROTTLED response for a query whose requested cost is
+// 100, with the bucket holding available points.
+//
+// Assumed shape: no throttled response has been recorded from the dev store
+// yet (spec #1, Further Notes). This follows Shopify's rate limit docs: HTTP
+// 200, an error with extensions.code "THROTTLED", and the usual cost report
+// with a null actual cost. Replace it with a recording once one exists.
+func throttledBody(available float64) string {
+	return fmt.Sprintf(`{
+	  "errors": [{"message": "Throttled", "extensions": {"code": "THROTTLED",
+	    "documentation": "https://shopify.dev/api/usage/rate-limits"}}],
+	  "extensions": {"cost": {"requestedQueryCost": 100, "actualQueryCost": null,
+	    "throttleStatus": {"maximumAvailable": 1000.0, "currentlyAvailable": %g, "restoreRate": 50.0}}}
+	}`, available)
+}
+
+// answers answers the nth GraphQL request with bodies[n-1], and repeats the
+// last body after that.
+func answers(bodies ...string) func(http.ResponseWriter, string, int) {
+	return func(w http.ResponseWriter, _ string, call int) {
+		fmt.Fprint(w, bodies[min(call, len(bodies))-1])
+	}
+}
+
+func queryBy(t *testing.T, c *Client, deadline time.Duration) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), deadline)
+	defer cancel()
+	var data shopData
+	_, err := c.Query(ctx, "query { shop { name } }", nil, &data)
+	return err
+}
+
+func TestBucketIsAssumedFullUntilTheFirstResponse(t *testing.T) {
+	f := newFakeShopify(t, answer(costBody(1000)))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+
+	mustQuery(t, c)
+
+	if got := clock.Waits(); len(got) != 0 {
+		t.Errorf("waits = %v, want none", got)
+	}
+}
+
+func TestWaitsWhenCapacityRefillsBeforeTheDeadline(t *testing.T) {
+	// The first response leaves 25 points; the query costs 100 and the
+	// bucket refills at 50 a second, so the next call needs 1.5s.
+	f := newFakeShopify(t, answer(costBody(25)))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+	mustQuery(t, c)
+
+	if err := queryBy(t, c, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := clock.Waits(), []time.Duration{1500 * time.Millisecond}; !reflect.DeepEqual(got, want) {
+		t.Errorf("waits = %v, want %v", got, want)
+	}
+	if got := len(f.Tokens()); got != 2 {
+		t.Errorf("GraphQL requests = %d, want 2", got)
+	}
+}
+
+func TestBucketRefillsWithTime(t *testing.T) {
+	f := newFakeShopify(t, answer(costBody(25)))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+	mustQuery(t, c)
+
+	clock.Advance(time.Second) // 25 + 50 = 75 points: 0.5s still to go
+	mustQuery(t, c)
+
+	if got, want := clock.Waits(), []time.Duration{500 * time.Millisecond}; !reflect.DeepEqual(got, want) {
+		t.Errorf("waits = %v, want %v", got, want)
+	}
+}
+
+func TestBucketUpdatesFromEveryResponse(t *testing.T) {
+	// The second response reports a full bucket, so the third call doesn't wait.
+	f := newFakeShopify(t, answers(costBody(25), costBody(1000)))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+
+	mustQuery(t, c)
+	mustQuery(t, c) // waits 1.5s
+	mustQuery(t, c)
+
+	if got, want := clock.Waits(), []time.Duration{1500 * time.Millisecond}; !reflect.DeepEqual(got, want) {
+		t.Errorf("waits = %v, want %v", got, want)
+	}
+}
+
+func TestFailsFastWhenCapacityWontRefillBeforeTheDeadline(t *testing.T) {
+	f := newFakeShopify(t, answer(costBody(25)))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+	mustQuery(t, c)
+
+	err := queryBy(t, c, time.Second)
+
+	var throttled *ThrottledError
+	if !errors.As(err, &throttled) {
+		t.Fatalf("error = %v (%T), want *ThrottledError", err, err)
+	}
+	if throttled.Wait != 1500*time.Millisecond {
+		t.Errorf("suggested wait = %v, want 1.5s", throttled.Wait)
+	}
+	if got := clock.Waits(); len(got) != 0 {
+		t.Errorf("waits = %v, want none", got)
+	}
+	if got := len(f.Tokens()); got != 1 {
+		t.Errorf("GraphQL requests = %d, want 1 (the throttled call never reached Shopify)", got)
+	}
+}
+
+func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
+	f := newFakeShopify(t, answers(throttledBody(25), costBody(0)))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+
+	var data shopData
+	resp, err := c.Query(t.Context(), "query { shop { name } }", nil, &data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if data.Shop.Name != "storewarden-dev" || resp.RequestID != "request-2" {
+		t.Errorf("got %q from %q, want the retry's result", data.Shop.Name, resp.RequestID)
+	}
+	if got, want := clock.Waits(), []time.Duration{1500 * time.Millisecond}; !reflect.DeepEqual(got, want) {
+		t.Errorf("waits = %v, want %v", got, want)
+	}
+	if got := len(f.Tokens()); got != 2 {
+		t.Errorf("GraphQL requests = %d, want 2", got)
+	}
+}
+
+func TestAThrottledRetryIsNotRetriedAgain(t *testing.T) {
+	f := newFakeShopify(t, answer(throttledBody(25)))
+	c := newTestClient(f, newFakeClock())
+
+	resp, err := query(t, c)
+
+	var throttled *ThrottledError
+	if !errors.As(err, &throttled) {
+		t.Fatalf("error = %v (%T), want *ThrottledError", err, err)
+	}
+	if throttled.Wait != 1500*time.Millisecond {
+		t.Errorf("suggested wait = %v, want 1.5s", throttled.Wait)
+	}
+	if resp == nil || resp.RequestID != "request-2" {
+		t.Errorf("response = %+v, want the retry's request ID", resp)
+	}
+	if got := len(f.Tokens()); got != 2 {
+		t.Errorf("GraphQL requests = %d, want 2", got)
+	}
+}
+
+func TestAThrottledResponseFailsFastWhenTheRetryWouldMissTheDeadline(t *testing.T) {
+	f := newFakeShopify(t, answer(throttledBody(25)))
+	c := newTestClient(f, newFakeClock())
+
+	err := queryBy(t, c, time.Second)
+
+	var throttled *ThrottledError
+	if !errors.As(err, &throttled) {
+		t.Fatalf("error = %v (%T), want *ThrottledError", err, err)
+	}
+	if got := len(f.Tokens()); got != 1 {
+		t.Errorf("GraphQL requests = %d, want 1", got)
 	}
 }
 

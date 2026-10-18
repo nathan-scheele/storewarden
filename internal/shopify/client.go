@@ -46,6 +46,7 @@ type Client struct {
 	clientSecret string
 	hc           *http.Client
 	clock        clock
+	bucket       bucket // the Store's query cost bucket, as far as the client knows it
 
 	mu     sync.Mutex // held while a token is fetched, so only one runs at a time
 	token  string
@@ -88,9 +89,43 @@ type Response struct {
 }
 
 // Query runs a GraphQL query and decodes its data into data.
+//
+// It first waits for the Store's cost bucket to hold enough for the query,
+// or returns a *ThrottledError at once if that wait would outlast ctx's
+// deadline. If Shopify throttles the query anyway, it is retried once the
+// same way. Shopify's errors come back as GraphQLErrors or UserErrors. The
+// Response, when not nil, is from the last request Shopify answered, even
+// if there is an error.
 func (c *Client) Query(ctx context.Context, query string, variables map[string]any, data any) (*Response, error) {
 	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
+		return nil, err
+	}
+	resp, err := c.queryOnce(ctx, query, body, data)
+	if !throttled(err) {
+		return resp, err
+	}
+	// The bucket now holds Shopify's figures from the throttled response,
+	// so the retry waits just long enough.
+	retryResp, err := c.queryOnce(ctx, query, body, data)
+	if retryResp != nil {
+		resp = retryResp
+	}
+	if throttled(err) {
+		return resp, &ThrottledError{Wait: c.bucket.wait(c.clock.Now(), query)}
+	}
+	return resp, err
+}
+
+// throttled reports whether err is Shopify's THROTTLED error.
+func throttled(err error) bool {
+	var errs GraphQLErrors
+	return errors.As(err, &errs) && errs.has("THROTTLED")
+}
+
+// queryOnce waits for capacity, then sends one query and decodes the answer.
+func (c *Client) queryOnce(ctx context.Context, query string, body []byte, data any) (*Response, error) {
+	if err := c.waitForCapacity(ctx, query); err != nil {
 		return nil, err
 	}
 	resp, err := c.post(ctx, body)
@@ -119,6 +154,7 @@ func (c *Client) Query(ctx context.Context, query string, variables map[string]a
 		return meta, fmt.Errorf("shopify: graphql: decoding response: %w", err)
 	}
 	meta.Cost = out.Extensions.Cost
+	c.bucket.record(c.clock.Now(), query, meta.Cost)
 	if len(out.Errors) > 0 {
 		errs := make(GraphQLErrors, len(out.Errors))
 		for i, e := range out.Errors {
