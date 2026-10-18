@@ -4,10 +4,19 @@
 TAGS := ts_omit_peerapiserver
 BIN  ?= bin
 
-.PHONY: check fmt vet test lint build smoke hooks
+# Analysis tools run at pinned versions with `go run tool@version`, so they
+# stay out of go.mod. CI uses the same versions through these targets.
+STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.8.2
+GOVULNCHECK := golang.org/x/vuln/cmd/govulncheck@v1.9.0
 
-# check is what the pre-commit hook and CI run.
-check: fmt vet test
+.PHONY: check ci fmt vet never-public test lint vuln build smoke hooks
+
+# check is what the pre-commit hook runs. It needs no network.
+check: fmt vet never-public test
+
+# ci is check plus the tools that download themselves or the vulnerability
+# database. The GitHub Actions workflow runs each of these as its own step.
+ci: check lint vuln
 
 fmt:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; echo "gofmt needed"; exit 1; }
@@ -17,11 +26,21 @@ vet:
 	go vet ./...
 	go vet -tags $(TAGS) ./...
 
+# Fails if non-test code could make storewarden reachable from outside the
+# tailnet: Funnel, serve config, a host listener, or a tsnet program that
+# doesn't refuse to run with the peer API server built in.
+never-public:
+	go run ./scripts/never-public
+
 test:
 	go test -race -tags $(TAGS) ./...
 
 lint:
-	staticcheck -tags $(TAGS) ./...
+	go run $(STATICCHECK) ./...
+	go run $(STATICCHECK) -tags $(TAGS) ./...
+
+vuln:
+	go run $(GOVULNCHECK) -tags $(TAGS) ./...
 
 build:
 	go build -tags $(TAGS) -o $(BIN)/ ./cmd/...
