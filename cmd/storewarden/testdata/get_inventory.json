@@ -16,6 +16,18 @@
               {
                 "name": "on_hand",
                 "quantity": 50
+              },
+              {
+                "name": "damaged",
+                "quantity": 0
+              },
+              {
+                "name": "quality_control",
+                "quantity": 0
+              },
+              {
+                "name": "safety_stock",
+                "quantity": 0
               }
             ]
           },
@@ -32,6 +44,18 @@
               {
                 "name": "on_hand",
                 "quantity": 50
+              },
+              {
+                "name": "damaged",
+                "quantity": 0
+              },
+              {
+                "name": "quality_control",
+                "quantity": 0
+              },
+              {
+                "name": "safety_stock",
+                "quantity": 0
               }
             ]
           }

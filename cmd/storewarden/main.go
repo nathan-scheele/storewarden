@@ -27,23 +27,29 @@ import (
 const version = "dev"
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		slog.Error("storewarden stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+// run starts storewarden with the command-line arguments args, and returns
+// when it stops. A bad flag exits the process, as flag.Parse would.
+func run(args []string) error {
+	// A FlagSet of its own, rather than the package's global one, so that
+	// a test can call run more than once.
+	flags := flag.NewFlagSet("storewarden", flag.ExitOnError)
 	var (
-		store       = flag.String("store", "", "the Store's `domain`, <name>.myshopify.com (required)")
-		hostname    = flag.String("hostname", "storewarden", "tailnet node `name`")
-		stateDir    = flag.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
-		tags        = flag.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
-		allowWrites = flag.Bool("allow-writes", false, "Write mode: serve the Write tool to Callers granted it")
-		auditPath   = flag.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
-		debug       = flag.Bool("debug", false, "log at debug level, including tsnet's backend logs")
+		store       = flags.String("store", "", "the Store's `domain`, <name>.myshopify.com (required)")
+		hostname    = flags.String("hostname", "storewarden", "tailnet node `name`")
+		stateDir    = flags.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
+		tags        = flags.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
+		allowWrites = flags.Bool("allow-writes", false, "Write mode: serve the Write tool to Callers granted it")
+		quotaShare  = flags.Float64("quota-share", 0.5, "each Caller's Quota, as a `share` of the Store's rate limit: above 0, at most 1")
+		auditPath   = flags.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
+		debug       = flags.Bool("debug", false, "log at debug level, including tsnet's backend logs")
 	)
-	flag.Parse()
+	flags.Parse(args) // ExitOnError: it never returns an error
 
 	level := slog.LevelInfo
 	if *debug {
@@ -66,6 +72,10 @@ func run() error {
 	clientID, clientSecret := os.Getenv("SHOPIFY_CLIENT_ID"), os.Getenv("SHOPIFY_CLIENT_SECRET")
 	if clientID == "" || clientSecret == "" {
 		return errors.New("SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET must be set")
+	}
+	client, err := shopify.New("https://"+*store, clientID, clientSecret, *quotaShare, &http.Client{Timeout: 30 * time.Second}, logger)
+	if err != nil {
+		return fmt.Errorf("--quota-share: %w", err)
 	}
 
 	// Opened before the tailnet node starts, so the deferred Close runs
@@ -124,7 +134,6 @@ func run() error {
 		return err
 	}
 
-	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second}, logger)
 	srv := &http.Server{
 		Handler:           newHandler(lc, client, *allowWrites, auditLog, logger),
 		ReadHeaderTimeout: 10 * time.Second,

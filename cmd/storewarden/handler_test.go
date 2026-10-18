@@ -34,6 +34,9 @@ const (
 	testToken        = "shpat_test-token-LEAKMARKER"
 
 	testShopifyRequestID = "shopify-request-0001"
+
+	// testQuotaShare is the harness's Quota share: storewarden's default.
+	testQuotaShare = 0.5
 )
 
 // fakeWhoIs answers every WhoIs call the same way. A func type with a
@@ -269,7 +272,10 @@ func startHarness(t *testing.T, whois authz.WhoIser, writeMode bool) *harness {
 	logs := &syncBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	store := newFakeShopify(t)
-	client := shopify.New(store.URL, testClientID, testClientSecret, nil, logger)
+	client, err := shopify.New(store.URL, testClientID, testClientSecret, testQuotaShare, nil, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sink := &auditSink{}
 	srv := httptest.NewServer(newHandler(whois, client, writeMode, audit.New(sink, logger), logger))
 	t.Cleanup(srv.Close)
@@ -344,6 +350,13 @@ func TestGrantedCallerSeesAndCallsGetShop(t *testing.T) {
 			"currently_available": 19998.0,
 			"maximum_available":   20000.0,
 			"restore_rate":        1000.0,
+		},
+		// The share 0.5 of the Store's bucket. The Caller's Quota is new,
+		// and a new Quota starts full.
+		"quota": map[string]any{
+			"available":    10000.0,
+			"maximum":      10000.0,
+			"restore_rate": 500.0,
 		},
 	}
 	if got := callGetShop(t, cs); !reflect.DeepEqual(got, want) {

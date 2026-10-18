@@ -208,12 +208,13 @@ finish() {
 # only to refuse to run in it.
 #
 # Part 1 (stages 9-13) checks the tailnet and the Grants with get_shop.
-# Part 2 (stages 14-19) grants one test Caller every Tool and another only
+# Part 2 (stages 14-21) grants one test Caller every Tool and another only
 # the Read tools, calls every Tool, takes one inventory item through a Dry
-# run, a real write, a retry and a stale write, puts it back, and checks
-# the Audit records.
+# run, a real write, a retry and a stale write, puts it back, does the same
+# for a move to damaged and back, runs one test Caller out of its Quota while
+# the other keeps working, and checks the Audit records.
 
-ISSUE=9          # the smoke-test issue the results are posted to
+ISSUE=17         # the smoke-test issue the results are posted to
 CAP="github.com/nathan-scheele/storewarden"
 ADMIN="https://login.tailscale.com/admin"
 RESULTS=()       # "PASS  check" or "FAIL  check"
@@ -401,21 +402,23 @@ if s.get("error"):
 }
 scenario_get() { json_get "$SCENARIO" "$1"; }
 
-# check_audit FILE EXECUTED SHOP TITLE checks the Audit records in FILE:
-# their fields, an attempt and a result for each Tool, the denials, the real
-# write's Dry run and Idempotency key (its request ID is EXECUTED), and that
-# no record holds Shopify response content (the shop name and product title
-# that Shopify returned). It prints one "PASS|FAIL<tab>check<tab>detail" line
-# per check.
+# check_audit FILE EXECUTED MOVED SHOP TITLE checks the Audit records in
+# FILE: their fields, an attempt and a result for each Tool, the denials,
+# the Quota refusals, the Dry run flag and Idempotency key of the real write
+# (its request ID is EXECUTED) and of the real move (MOVED), and that no
+# record holds Shopify response content (the shop name and product title
+# that Shopify returned). It prints one "PASS|FAIL<tab>check<tab>detail"
+# line per check.
 check_audit() {
   python3 -c '
 import json, sys
 
-path, executed, shop, title = sys.argv[1:5]
+path, executed, moved, shop, title = sys.argv[1:6]
 fields = ["time", "request_id", "phase", "caller", "tool", "args", "decision",
           "reason", "dry_run", "idempotency_key", "outcome", "error", "duration_ms"]
 caller_fields = ["node_id", "node_name", "tags", "user"]
-tools = ["get_shop", "search_products", "get_product", "get_inventory", "set_inventory_quantity"]
+tools = ["get_shop", "search_products", "get_product", "get_inventory", "set_inventory_quantity",
+         "move_inventory_quantity"]
 
 def report(ok, check, detail=""):
     print("PASS" if ok else "FAIL", check, detail, sep="\t")
@@ -441,17 +444,32 @@ report(not lacking, "every Tool called has attempt and result records",
 
 denied = [r for r in records if r.get("phase") == "denied"]
 report(any(r.get("tool") == "" for r in denied)
-       and any(r.get("tool") == "set_inventory_quantity" for r in denied),
-       "the 403s and the read-only Caller'"'"'s Write tool call have denial records",
+       and any(r.get("tool") == "set_inventory_quantity" for r in denied)
+       and any(r.get("tool") == "move_inventory_quantity" for r in denied),
+       "the 403s and the read-only Caller'"'"'s Write tool calls have denial records",
        f"{len(denied)} denial records")
 
-write = [r for r in records if r.get("request_id") == executed]
-result = [r for r in write if r.get("phase") == "result"]
-report(executed and len(write) == 2
-       and all(r.get("dry_run") is False and r.get("idempotency_key") for r in write)
-       and result and (result[0].get("shopify") or {}).get("request_id"),
-       "the real write'"'"'s records show dry_run false, its Idempotency key and Shopify'"'"'s request ID",
-       f"{len(write)} records")
+refused = [r for r in records if r.get("phase") == "result" and "Quota" in (r.get("error") or "")]
+attempts = {r.get("request_id") for r in records if r.get("phase") == "attempt"}
+report(refused and all(r.get("request_id") in attempts for r in refused)
+       and not any(r.get("tool") == "get_inventory" for r in denied),
+       "a Quota refusal has an attempt record, a result record naming the Quota, and no denial record",
+       f"{len(refused)} Quota refusals")
+
+# A real move'"'"'s args must also hold both Inventory states, the quantity and
+# both Expected quantities.
+for request_id, what, args in ((executed, "real write", []),
+                               (moved, "real move", ["from", "to", "quantity", "expected_from_quantity",
+                                                     "expected_to_quantity"])):
+    write = [r for r in records if r.get("request_id") == request_id]
+    result = [r for r in write if r.get("phase") == "result"]
+    report(request_id and len(write) == 2
+           and all(r.get("dry_run") is False and r.get("idempotency_key")
+                   and all(a in (r.get("args") or {}) for a in args) for r in write)
+           and result and (result[0].get("shopify") or {}).get("request_id"),
+           f"the {what}'"'"'s records show dry_run false, its Idempotency key and Shopify'"'"'s request ID"
+           + (", with both states, the quantity and both Expected quantities" if args else ""),
+           f"{len(write)} records")
 
 leaked = [name for name, value in (("shop name", shop), ("product title", title))
           if value and value in text]
@@ -464,7 +482,7 @@ check_all_granted() {
   smoke_check
   local tools; tools=$(smoke_get tools)
   [[ "$(smoke_get mcp)" == 200 && ",$tools," == *",set_inventory_quantity,"* &&
-     $(tr -cd , <<<"$tools" | wc -c) -eq 4 ]]
+     ",$tools," == *",move_inventory_quantity,"* && $(tr -cd , <<<"$tools" | wc -c) -eq 5 ]]
 }
 
 check_healthy()     { smoke_check; [[ "$(smoke_get healthz)" == 200 && "$(smoke_get healthz_body)" == healthy ]]; }
@@ -535,7 +553,7 @@ edit_policy() {
 
 run_wizard() {
 
-TOTAL_STAGES=21
+TOTAL_STAGES=23
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # A worktree has no .env of its own, so use the main checkout's.
@@ -548,7 +566,7 @@ case "$(uname)" in
   *)      STATE_DIR="${STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/storewarden}" ;;
 esac
 
-banner "storewarden smoke test (#$ISSUE): the tailnet, every Tool and the Write tool"
+banner "storewarden smoke test (#$ISSUE): the tailnet, every Tool, the Write tools and Quotas"
 
 # ── 1 ─────────────────────────────────────────────────────────────────────
 stage "Preflight"
@@ -624,7 +642,7 @@ pause
 # ── 6 ─────────────────────────────────────────────────────────────────────
 stage "Auth key for the read-only test Caller"
 say "Part 2 adds a second test Caller, granted only the Read tools, to check"
-say "that the Write tool is hidden from it. It needs its own tag, so its own key,"
+say "that the Write tools are hidden from it. It needs its own tag, so its own key,"
 say "saved in $ENV_FILE as well."
 if [[ -z "$(_existing TS_SMOKE_RO_AUTHKEY || true)" ]]; then
   visit "$ADMIN/settings/keys"
@@ -648,8 +666,10 @@ make build BIN="$tmpdir"
 (
   export SHOPIFY_CLIENT_ID SHOPIFY_CLIENT_SECRET
   if [[ -n "$TS_AUTHKEY" ]]; then export TS_AUTHKEY; fi
+  # A Quota of 5%: on the dev store's Plus plan, 1000 points refilling at
+  # 50 a second. That covers Part 2, and a burst of calls spends it.
   exec "$tmpdir/storewarden" --store "$SHOPIFY_STORE" --state-dir "$STATE_DIR" \
-    --allow-writes --audit-log "$AUDIT"
+    --allow-writes --quota-share 0.05 --audit-log "$AUDIT"
 ) >"$LOG" 2>&1 &
 SW_PID=$!
 say "Waiting for it to join the tailnet…"
@@ -684,7 +704,7 @@ fi
 record PASS "storewarden joined the personal tailnet and is serving"
 note "Logs: $LOG"
 note "Audit records: $AUDIT"
-note "It runs in Write mode, but only the Grant in Part 2 names the Write tool."
+note "It runs in Write mode, but only the Grant in Part 2 names the Write tools."
 step "Optional: on the Machines page, 'storewarden' shows tag:storewarden and no Ephemeral badge."
 pause
 
@@ -777,13 +797,13 @@ pause
 
 # ── 14 ────────────────────────────────────────────────────────────────────
 stage "Part 2: grant every Tool"
-say "Part 1 is done. Part 2 grants the test Caller all five Tools, and a second,"
+say "Part 1 is done. Part 2 grants the test Caller all six Tools, and a second,"
 say "read-only test Caller only the four Read tools."
 edit_policy "Grant every Tool to the test Caller, and the Read tools to the read-only one." \
-  '{"tools": ["get_shop", "search_products", "get_product", "get_inventory", "set_inventory_quantity"]}' \
+  '{"tools": ["get_shop", "search_products", "get_product", "get_inventory", "set_inventory_quantity", "move_inventory_quantity"]}' \
   '{"tools": ["get_shop", "search_products", "get_product", "get_inventory"]}'
-if poll 120 check_all_granted; then record PASS "with Write mode on, a Grant naming all five Tools shows all five"
-else record FAIL "with Write mode on, a Grant naming all five Tools shows all five (tools: $(smoke_get tools))"; fi
+if poll 120 check_all_granted; then record PASS "with Write mode on, a Grant naming all six Tools shows all six"
+else record FAIL "with Write mode on, a Grant naming all six Tools shows all six (tools: $(smoke_get tools))"; fi
 say "Starting the read-only test Caller…"
 local ro_log="$tmpdir/storewarden-smoke-ro.log"
 mkfifo "$tmpdir/ro.in" "$tmpdir/ro.out"
@@ -810,8 +830,8 @@ pause
 
 # ── 15 ────────────────────────────────────────────────────────────────────
 stage "Every Tool, and the Write tool from Dry run to retry"
-say "The test Caller now calls each Read tool, then picks the first stocked"
-say "inventory item and, on the development store:"
+say "The test Caller now calls each Read tool, then picks the first inventory item"
+say "with stock available (or else the first stocked one) and, on the development store:"
 step "makes a Dry run of adding 1 to its available quantity;"
 step "makes the change for real, with an Idempotency key and Expected quantity;"
 step "retries that call with the same key, which must not add 1 again;"
@@ -820,31 +840,64 @@ step "puts the quantity back."
 pause "Press Enter to run it (it takes a few seconds)"
 run_scenario tools 3 4
 record_scenario
-local shop_name product_title executed_id restored_id
+local shop_name product_title executed_id restored_id product_id variant_id item_id location_id
 shop_name=$(scenario_get shop_name)
 product_title=$(scenario_get product_title)
 executed_id=$(scenario_get executed_request_id)
 restored_id=$(scenario_get restored_request_id)
+product_id=$(scenario_get product_id)
+variant_id=$(scenario_get variant_id)
+item_id=$(scenario_get item_id)
+location_id=$(scenario_get location_id)
 if [[ -n "$product_title" ]]; then
-  note "Item: $product_title, $(scenario_get item_id) at $(scenario_get location_id);"
+  note "Item: $product_title, $item_id at $location_id;"
   note "available was $(scenario_get before)."
 fi
 pause
 
 # ── 16 ────────────────────────────────────────────────────────────────────
-stage "The change in Shopify's inventory history"
-if [[ -n "$executed_id" ]]; then
+stage "move_inventory_quantity from Dry run to moving back"
+local moved_id moved_back_id
+if [[ -n "$item_id" ]]; then
+  say "On the same inventory item and location, the test Caller now:"
+  step "makes a Dry run of moving 1 unit from available to damaged;"
+  step "makes the move for real, with an Idempotency key and both Expected quantities;"
+  step "retries that call with the same key, which must not move again, and records"
+  step "which answer came back;"
+  step "tries another move with the old Expected quantities, which must be refused;"
+  step "asks to move more than damaged holds with the real Expected quantities,"
+  step "which storewarden must refuse;"
+  step "asks again claiming damaged holds enough, which Shopify must refuse as stale;"
+  step "moves the unit back to available."
+  pause "Press Enter to run it (it takes a few seconds)"
+  run_scenario "move $item_id $location_id" 3 4
+  record_scenario
+  moved_id=$(scenario_get executed_request_id)
+  moved_back_id=$(scenario_get restored_request_id)
+else
+  warn "The previous stage found no stocked inventory item to move."
+  record FAIL "the move round trip ran (no stocked inventory item)"
+fi
+pause
+
+# ── 17 ────────────────────────────────────────────────────────────────────
+stage "The change and the move in Shopify's inventory history"
+if [[ -n "$executed_id" || -n "$moved_id" ]]; then
   local handle product variant
   handle=${SHOPIFY_STORE%.myshopify.com}
-  product=$(scenario_get product_id); product=${product##*/}
-  variant=$(scenario_get variant_id); variant=${variant##*/}
+  product=${product_id##*/}
+  variant=${variant_id##*/}
   say "Open this in the browser where you're signed into the development store's"
   say "admin, then open the variant's inventory adjustment history:"
   printf '  %s↗%s https://admin.shopify.com/store/%s/products/%s/variants/%s\n' \
     "$GREEN" "$RESET" "$handle" "$product" "$variant"
-  say "Look for the two changes, with these references:"
-  note "  storewarden://audit/$executed_id   (+1)"
+  say "Look for these entries and their references:"
+  [[ -n "$executed_id" ]] && note "  storewarden://audit/$executed_id   (+1, reason correction)"
   [[ -n "$restored_id" ]] && note "  storewarden://audit/$restored_id   (put back)"
+  [[ -n "$moved_id" ]] && note "  storewarden://audit/$moved_id   (1 available → damaged, reason damaged)"
+  [[ -n "$moved_back_id" ]] && note "  storewarden://audit/$moved_back_id   (1 damaged → available, reason damaged)"
+fi
+if [[ -n "$executed_id" ]]; then
   if confirm "Does the history show the change with its storewarden:// reference?"; then
     record PASS "the change shows in Shopify's inventory history with its storewarden:// reference (checked by hand)"
   else
@@ -854,15 +907,43 @@ else
   warn "There was no real write to look for."
   record FAIL "the change shows in Shopify's inventory history (no real write was made)"
 fi
+if [[ -n "$moved_id" ]]; then
+  if confirm "Does the history show the move to damaged with reason damaged and its storewarden:// reference?"; then
+    record PASS "the move shows in Shopify's inventory history with its reason and storewarden:// reference (checked by hand)"
+  else
+    record FAIL "the move shows in Shopify's inventory history with its reason and storewarden:// reference (checked by hand)"
+  fi
+else
+  warn "There was no real move to look for."
+  record FAIL "the move shows in Shopify's inventory history (no real move was made)"
+fi
 pause
 
-# ── 17 ────────────────────────────────────────────────────────────────────
+# ── 18 ────────────────────────────────────────────────────────────────────
 stage "The read-only test Caller"
 run_scenario read-only 5 6
 record_scenario
 pause
 
-# ── 18 ────────────────────────────────────────────────────────────────────
+# ── 19 ────────────────────────────────────────────────────────────────────
+stage "One Caller runs out of its Quota"
+say "storewarden runs with --quota-share 0.05, so each Caller's Quota is 5% of"
+say "the Store's rate limit. The test Caller now calls get_inventory, several"
+say "calls at once, until storewarden refuses it for its Quota. Straight after,"
+say "the read-only test Caller makes the same call, which must still work."
+if [[ -n "$item_id" ]]; then
+  pause "Press Enter to run it (it takes a few seconds)"
+  run_scenario "quota $item_id" 3 4
+  record_scenario
+  run_scenario "quota-other $item_id" 5 6
+  record_scenario
+else
+  warn "Part 2 found no inventory item to call get_inventory with."
+  record FAIL "one Caller runs out of its Quota while another keeps working (no inventory item)"
+fi
+pause
+
+# ── 20 ────────────────────────────────────────────────────────────────────
 stage "Clean shutdown"
 MARK=$(log_lines)
 say "Sending SIGINT to storewarden…"
@@ -877,7 +958,7 @@ else
 fi
 pause
 
-# ── 19 ────────────────────────────────────────────────────────────────────
+# ── 21 ────────────────────────────────────────────────────────────────────
 stage "Audit records"
 say "Reading $AUDIT, now that storewarden has flushed and closed it."
 local verdict check detail
@@ -888,10 +969,10 @@ while IFS=$'\t' read -r verdict check detail; do
   else
     record FAIL "$check${detail:+ ($detail)}"
   fi
-done < <(check_audit "$AUDIT" "$executed_id" "$shop_name" "$product_title")
+done < <(check_audit "$AUDIT" "$executed_id" "$moved_id" "$shop_name" "$product_title")
 pause
 
-# ── 20 ────────────────────────────────────────────────────────────────────
+# ── 22 ────────────────────────────────────────────────────────────────────
 stage "Tidy up"
 say "Stopping the test Callers; each removes its own node from the tailnet."
 exec 3>&- 5>&-
@@ -906,7 +987,7 @@ say "To remove them: Machines → storewarden → Remove; delete the policy line
 say "revoke the keys under Settings → Keys and delete them from $ENV_FILE."
 pause
 
-# ── 21 ────────────────────────────────────────────────────────────────────
+# ── 23 ────────────────────────────────────────────────────────────────────
 stage "Results"
 local r passed=0 failed=0 table=""
 for r in "${RESULTS[@]}"; do

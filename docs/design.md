@@ -8,14 +8,13 @@ storewarden is a single Go binary. It joins a tailnet with `tsnet` and serves a 
 - Authorization lives in the tailnet policy file, not in storewarden's config.
 - Write tools are off by default, dry run by default, idempotent and compare-and-swap.
 - Every attempted Tool call leaves an Audit record.
-- Shopify's cost-based rate limit is respected.
+- Shopify's cost-based rate limit is respected, and no one Caller can use all of it.
 - Reachable only over the tailnet. Never public.
 
 ## Non-goals (v1)
 
 - A raw GraphQL Tool, or any Tool not listed below.
 - More than one Store per process. Run a second instance instead.
-- Per-Caller rate quotas.
 - MCP sampling, elicitation, resources or prompts (see [ADR 0001](adr/0001-stateless-mcp-for-per-request-identity.md)).
 - HTTPS on the tailnet (WireGuard already encrypts tailnet traffic).
 - Running behind `tailscale serve` or any proxy. That would break WhoIs.
@@ -39,7 +38,7 @@ cmd/storewarden-smoke     test Caller for the manual smoke test (scripts/smoke-t
 internal/authz            WhoIs → Caller + allowed Tools; HTTP + MCP middleware
 internal/audit            Audit record writer (JSON Lines, fail closed)
 internal/shopify          GraphQL client, token source, cost throttle
-internal/tools            the five Tool definitions
+internal/tools            the six Tool definitions
 ```
 
 ## Request flow
@@ -122,23 +121,27 @@ All Tools use fixed GraphQL documents against Admin API **2026-10**, pinned as a
 | `get_shop` | Read | `shop` | none |
 | `search_products` | Read | `products(query:, first:, after:)` | `read_products` |
 | `get_product` | Read | `product(id:)` + variants (first 100) | `read_products` |
-| `get_inventory` | Read | `inventoryItem(id:).inventoryLevels` with `quantities(names: ["available","on_hand"])` | `read_inventory`, `read_locations` |
+| `get_inventory` | Read | `inventoryItem(id:).inventoryLevels` with `quantities(names: ["available","on_hand","damaged","quality_control","safety_stock"])` | `read_inventory`, `read_locations` |
 | `set_inventory_quantity` | Write | `inventorySetQuantities @idempotent` | `write_inventory` |
+| `move_inventory_quantity` | Write | `inventoryMoveQuantities @idempotent` | `write_inventory` |
 
 **Inputs and outputs** (Go structs, schema inferred by the SDK):
 
-- `get_shop` → name, myshopify domain, plan, currency, and the current throttle status.
+- `get_shop` → name, myshopify domain, plan, currency, the Store's current throttle status, and the calling Caller's own Quota (`available`, `maximum`, `restore_rate`, read after the call's own charge; omitted until Shopify has reported the Store's limits).
 - `search_products` (`query` string in Shopify search syntax; `first` 1–50, default 10; optional `after` cursor) → `products[{id, title, handle, status, total_inventory}]`, `next_cursor`.
 - `get_product` (`id` as a product GID) → id, title, handle, status, tags, `variants[{id, title, sku, inventory_item_id}]`. Each variant's `title` and `sku` are there so a Caller can tell variants apart before it reads their inventory.
-- `get_inventory` (`inventory_item_id`) → `levels[{location_id, location_name, available, on_hand}]`.
+- `get_inventory` (`inventory_item_id`) → `levels[{location_id, location_name, available, on_hand, damaged, quality_control, safety_stock}]`.
 - `set_inventory_quantity`. Input: `inventory_item_id`, `location_id`, `quantity` (≥ 0), and these three:
   - `dry_run`: default **true**.
   - `idempotency_key`: required when `dry_run` is false; 1–255 characters, UUID recommended.
   - `expected_quantity`: required when `dry_run` is false.
 
   Output: `dry_run`, `current`, `new`, `applied`, `request_id`.
+- `move_inventory_quantity`. Input: `inventory_item_id`, `location_id`, `from` and `to` (each one of `available`, `damaged`, `quality_control`, `safety_stock`, exactly one of them `available`), `quantity` (≥ 1), `dry_run` (default **true**), and, required when `dry_run` is false, `idempotency_key`, `expected_from_quantity` and `expected_to_quantity`.
 
-Annotations: Read tools get `ReadOnlyHint` and `IdempotentHint`. `set_inventory_quantity` gets `DestructiveHint` and `IdempotentHint`.
+  Output: `dry_run`, `from` and `to` (each `{current, new}`), `applied`, `request_id`.
+
+Annotations: Read tools get `ReadOnlyHint` and `IdempotentHint`. Write tools get `DestructiveHint` and `IdempotentHint`.
 
 ### Write semantics
 
@@ -158,14 +161,37 @@ Write tools are guarded by two keys. They are only registered when the server st
    - `CHANGE_FROM_QUANTITY_STALE` → "quantity changed since you read it; dry-run again".
    - `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` → "key reused with different input".
    - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable: the Tool error starts with `retryable: ` and ends `Retry the same call in 2s`, the same form as a rate-limited call.
+   - `IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED` → "an earlier call with this key failed; dry-run again and use a new key".
 
    Retryable errors are marked in their text, not as structured content. A Tool error reaches the Caller as text with `isError: true`; `structuredContent` would have to match the Tool's output schema, which describes a successful result, and an LLM Caller reads the text either way.
 
    Seen on the dev store (2026-10):
    - The input type takes `changeFromQuantity`; it has no `compareQuantity`.
    - A retry with the same key and input once returned the first call's result. Other retries, a few seconds and a minute after the first call, came back `CHANGE_FROM_QUANTITY_STALE` instead. So a Caller retrying a change that went through may get the stale-quantity error rather than the original result; the error tells it to dry-run, which shows whether the change was made.
-   - Identical requests with the same key sent at once never got `IDEMPOTENCY_CONCURRENT_REQUEST`: one applied and the rest got `CHANGE_FROM_QUANTITY_STALE`. That error's test response is therefore built from Shopify's documented code and message, not recorded.
+   - Identical requests with the same key sent at once never got `IDEMPOTENCY_CONCURRENT_REQUEST`: one applied and the rest got `CHANGE_FROM_QUANTITY_STALE`. That error's test response is therefore built from Shopify's documented code and message, not recorded, as is the previous-attempt-failed one (see the move Tool below).
    - In every case the compare-and-swap check stopped a second change.
+
+`move_inventory_quantity` is guarded the same way, by Write mode and its own Grant; a Grant for `set_inventory_quantity` doesn't cover it. It meets [ADR 0002](adr/0002-write-tools-only-where-shopify-enforces-idempotency.md) as it stands (see its 2026-10-18 note) and needs no scope beyond `write_inventory`.
+
+1. **Checks before Shopify:** exactly one of `from` and `to` is `available`, and they differ. `reserved`, `committed`, `incoming` and `on_hand` are never accepted. A real move also needs the Idempotency key and both Expected quantities, and `quantity` may not exceed `expected_from_quantity`. Anything else is refused in plain words.
+2. **Dry run** (default): read `available`, `damaged`, `quality_control` and `safety_stock` at the location with one fixed query, and return both states' `current → new`. Nothing is written.
+3. **Execute** (`dry_run: false`): call `inventoryMoveQuantities` with one change:
+   - `changeFromQuantity` on `from` and on `to`, from `expected_from_quantity` and `expected_to_quantity`. Both are `Int!` in the document, so neither is ever null.
+   - `reason`: the non-available state's name (`damaged`, `quality_control` or `safety_stock`).
+   - `referenceDocumentUri: "storewarden://audit/<request-id>"`, which is also the `ledgerDocumentUri` on the non-available side. The document takes a nullable ledger URI for each side and the Tool sets exactly one: Shopify requires one except on `available`, and refuses one there.
+   - `@idempotent(key: idempotency_key)`
+
+   Errors in plain words, sharing `set_inventory_quantity`'s translation:
+   - `CHANGE_FROM_QUANTITY_STALE` (reported for either state or both) → "a quantity changed since you read it; dry-run again".
+   - `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` → "key reused with different input".
+   - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable, as for set.
+   - `IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED` → "an earlier call with this key failed; dry-run again and use a new key", as for set.
+   - Any other user error is passed through, and recorded by its codes.
+
+   Seen on the dev store (2026-10):
+   - An explicit null `ledgerDocumentUri` on the `available` side is accepted, in either direction.
+   - A move of more than the source state holds, with both `changeFromQuantity` values right, was applied and left the source negative (3 damaged, 4 moved, -1 left). Shopify doesn't stop it, so storewarden's own `quantity ≤ expected_from_quantity` check does.
+   - Resending a move that failed with a user error, with the same key and input, got the same user error, not `IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED`. That error's and the concurrent-request error's test responses are therefore built from Shopify's documented codes and messages.
 
 ## Shopify client (`internal/shopify`)
 
@@ -175,6 +201,13 @@ Write tools are guarded by two keys. They are only registered when the server st
   - After every response, record `extensions.cost.throttleStatus` (`currentlyAvailable`, `maximumAvailable`, `restoreRate`). Limits are never hardcoded; until the first response arrives, the bucket assumes it's full.
   - Before a call, estimate the refill needed for the query's known maximum cost. Each Tool passes that cost, a constant checked against a recording (`internal/tools/cost_test.go`), so the throttle can decide from the very first call. `search_products` passes its cost at the largest page size, 50, whatever page size the Caller asks for. A fixed maximum is always safe, because Shopify works out a query's requested cost from its text and variables before running it ([rate limits](https://shopify.dev/docs/apps/build/apis/graphql-admin/rate-limits)). If the wait ends before the request's deadline, wait. If not, fail fast with a retryable error (`shopify.ThrottledError`) that includes the suggested wait. Every Tool call gets a 30-second deadline (`callTimeout` in `internal/tools`), so this can happen; the Caller sees a Tool error starting `retryable: ` that ends `Retry the same call in <wait>`.
   - On `THROTTLED`, retry once after the calculated wait. Errors and `userErrors` come back as typed Go errors.
+- **Quotas** ([ADR 0005](adr/0005-quotas-set-by-the-operator-not-in-grants.md)): every Caller has its own Quota, a cost bucket beside the Store's that shares its bucket logic and injected clock.
+  - Its maximum and restore rate are `--quota-share` times the Store bucket's learned `maximumAvailable` and `restoreRate`, so they follow the Store's plan. Until Shopify has reported them, Quotas refuse nothing. A new Caller's Quota starts full.
+  - The client takes an opaque Quota key from the request context (`shopify.WithQuotaKey`), in the style of the observer hook, and knows nothing about Tailscale. `tools.Audited` puts the Caller's node stable ID there, after the attempt record. A query with no key has no Quota.
+  - Every request sent for the Caller is charged at the query's known maximum cost, the same constant the throttle uses, including Dry run reads and a throttled retry. Charges are never reconciled with the actual cost or refunded, even if the Store bucket then refuses the query.
+  - The Quota is checked first and never waits: if it can't cover the cost, the query fails at once with a `shopify.QuotaError` carrying the suggested wait. The Caller sees the retryable form above, worded as its Quota: `retryable: your Quota of the Store's rate limit is used up, so nothing was done. Retry the same call in <wait>`. The Store bucket then keeps its wait-or-fail-fast rule.
+  - The refusal is an allowed call that failed: an attempt and a result record whose error names the Quota, and no `denied` record.
+  - Quotas live in a map from key to bucket behind a mutex, in memory only, reset on restart. Nothing is evicted: there is one per tailnet node at most. `Client.Quota` reports a Quota's state, which `get_shop` shows the Caller.
 - Shopify's `X-Request-Id` response header goes into the Audit record.
 
 ## Audit (`internal/audit`)
@@ -203,6 +236,7 @@ Write tools are guarded by two keys. They are only registered when the server st
 | `--state-dir` | `$UserConfigDir/storewarden` | tsnet state; persistent, not ephemeral |
 | `--tags` | `tag:storewarden` | passed to `AdvertiseTags` |
 | `--allow-writes` | `false` | Write mode |
+| `--quota-share` | `0.5` | each Caller's Quota as a share of the Store's rate limit, in (0, 1]; anything else refuses to start |
 | `--audit-log` | `-` | Audit record destination |
 | `--debug` | `false` | debug-level logs, including tsnet's `Logf` |
 
@@ -227,13 +261,13 @@ Write tools are guarded by two keys. They are only registered when the server st
 | Ungranted tailnet peer | WhoIs on every request; no capability → 403; Tools hidden and denied |
 | Granted but prompt-injected Caller | Fixed Tools only (no raw query), Read tools by default, Write mode off, dry run by default, compare-and-swap, small grant sets |
 | Retried or duplicated write | Shopify-enforced Idempotency key |
-| Stale read leading to a wrong write | Expected quantity → `changeFromQuantity` |
+| Stale read leading to a wrong write | Expected quantity → `changeFromQuantity`, on both sides of a move |
 | Session reused by another peer | Stateless MCP (ADR 0001) |
 | Public exposure | No Funnel, serve or host listener code path; CI guard; tsnet clears stale serve config at startup |
 | Credential leak | Secrets only from env; never logged; token kept only in memory |
 | Unaudited action | Audit fails closed |
-| Granted Caller draining the cost bucket | Accepted v1 risk; per-Caller quotas are future work |
-| Audit log tampering on the host | Out of scope; ship logs off-host |
+| Granted Caller draining the cost bucket | A Quota per Caller (`--quota-share`). Accepted risk: Quotas are per node, so a Caller that can add tailnet nodes gets one Quota per node |
+| Audit log tampering on the host | Out of scope; ship logs off-host. Every real write and move is also referenced in Shopify's inventory history |
 
 ## Testing and CI
 
@@ -245,7 +279,7 @@ Two test seams:
   - The audit sink: an `io.Writer` that can be made to fail.
 
   Driven by the SDK client (`StreamableClientTransport`) over `httptest`. Covers authorization, list filtering, Write mode, dry run vs execute, Audit records and fail closed.
-- **Shopify client.** An `httptest` server plus an injected clock. Covers token reissue, the throttle's wait-vs-fail-fast decision, the `THROTTLED` retry and typed errors.
+- **Shopify client.** An `httptest` server plus an injected clock. Covers token reissue, the throttle's wait-vs-fail-fast decision, the `THROTTLED` retry, typed errors, and Quotas: their limits, refill, fail-fast refusal, independence per key, order before the Store bucket and the charge for a throttled retry.
 - GitHub Actions (`.github/workflows/ci.yml`): `go vet`, `staticcheck`, `go test -race ./...`, `govulncheck`, plus the never-public check. Each step is a make target; `make ci` runs them all locally.
 - Manual: `make smoke`, a documented run against a dev store.
 

@@ -5,7 +5,7 @@ package main
 // one inventory item through a Dry run, a real write, a retry with the same
 // Idempotency key and a write with a stale Expected quantity, and finally
 // puts the quantity back. "read-only" runs as a Caller granted only the Read
-// tools, and checks that the Write tool is hidden and denied.
+// tools, and checks that both Write tools are hidden and denied.
 
 import (
 	"context"
@@ -115,20 +115,8 @@ func (s session) toolNames(ctx context.Context) ([]string, error) {
 
 // available returns the available quantity of item at location.
 func (s session) available(ctx context.Context, item, location string) (int, error) {
-	var inv tools.Inventory
-	toolErr, err := s.call(ctx, "get_inventory", tools.GetInventoryInput{InventoryItemID: item}, &inv)
-	if err != nil {
-		return 0, err
-	}
-	if toolErr != "" {
-		return 0, fmt.Errorf("get_inventory: %s", toolErr)
-	}
-	for _, level := range inv.Levels {
-		if level.LocationID == location {
-			return level.Available, nil
-		}
-	}
-	return 0, fmt.Errorf("get_inventory shows no level at %s", location)
+	level, err := s.level(ctx, item, location)
+	return level.Available, err
 }
 
 // runTools is the "tools" command.
@@ -140,8 +128,8 @@ func runTools(ctx context.Context, s session) scenario {
 		sc.Error = "tools/list: " + err.Error()
 		return sc
 	}
-	sc.record("tools/list shows all five Tools to the fully granted Caller",
-		len(names) == 5 && slices.Contains(names, writeTool), strings.Join(names, ", "))
+	sc.record("tools/list shows all six Tools to the fully granted Caller",
+		len(names) == 6 && slices.Contains(names, writeTool) && slices.Contains(names, moveTool), strings.Join(names, ", "))
 
 	var shop tools.Shop
 	if toolErr, err := s.call(ctx, "get_shop", nil, &shop); sc.failed("get_shop", toolErr, err) {
@@ -169,8 +157,16 @@ func runTools(ctx context.Context, s session) scenario {
 	}
 
 	// Find an inventory item stocked at some location, product by product.
+	// The move round trip that follows needs a unit to move, so the first
+	// level with some available stock wins; failing that, the first stocked
+	// level will do for this round trip.
 	gotProduct := false
 	var level tools.InventoryLevel
+	pick := func(product tools.Product, v tools.Variant, l tools.InventoryLevel) {
+		level = l
+		sc.ProductID, sc.ProductTitle, sc.VariantID = product.ID, product.Title, v.ID
+		sc.ItemID, sc.LocationID, sc.Before = v.InventoryItemID, l.LocationID, l.Available
+	}
 search:
 	for _, summary := range append(page1.Products, page2.Products...) {
 		var product tools.Product
@@ -189,12 +185,14 @@ search:
 			if toolErr, err := s.call(ctx, "get_inventory", tools.GetInventoryInput{InventoryItemID: v.InventoryItemID}, &inv); sc.failed(read, toolErr, err) {
 				return sc
 			}
-			if len(inv.Levels) > 0 {
-				level = inv.Levels[0]
-				sc.record(read, true, fmt.Sprintf("%d available, %d on hand at %s", level.Available, level.OnHand, level.LocationName))
-				sc.ProductID, sc.ProductTitle, sc.VariantID = product.ID, product.Title, v.ID
-				sc.ItemID, sc.LocationID, sc.Before = v.InventoryItemID, level.LocationID, level.Available
-				break search
+			for _, l := range inv.Levels {
+				if sc.ItemID == "" {
+					pick(product, v, l)
+				}
+				if l.Available > 0 {
+					pick(product, v, l)
+					break search
+				}
 			}
 		}
 	}
@@ -202,6 +200,8 @@ search:
 		sc.Error = "no product on the first two pages is stocked at a location"
 		return sc
 	}
+	sc.record("get_inventory returns quantities by location", true,
+		fmt.Sprintf("%d available, %d on hand at %s", level.Available, level.OnHand, level.LocationName))
 
 	before := sc.Before
 	after := before + 1
@@ -276,7 +276,7 @@ func runReadOnly(ctx context.Context, s session) scenario {
 		return sc
 	}
 	sc.record("the read-only Caller's tools/list has the four Read tools and no Write tool",
-		len(names) == 4 && !slices.Contains(names, writeTool), strings.Join(names, ", "))
+		len(names) == 4 && !slices.Contains(names, writeTool) && !slices.Contains(names, moveTool), strings.Join(names, ", "))
 
 	var shop tools.Shop
 	const read = "the read-only Caller can use a Read tool"
@@ -293,6 +293,17 @@ func runReadOnly(ctx context.Context, s session) scenario {
 	toolErr, err := s.call(ctx, writeTool, in, &out)
 	want := fmt.Sprintf("unknown tool %q", writeTool)
 	sc.record("the read-only Caller calling the Write tool gets "+want,
+		err != nil && strings.Contains(err.Error(), want),
+		fmt.Sprintf("error %q, Tool error %q", errText(err), toolErr))
+
+	move := tools.MoveInventoryQuantityInput{
+		InventoryItemID: in.InventoryItemID, LocationID: in.LocationID,
+		From: "available", To: "damaged", Quantity: 1,
+	}
+	var moved tools.InventoryMove
+	toolErr, err = s.call(ctx, moveTool, move, &moved)
+	want = fmt.Sprintf("unknown tool %q", moveTool)
+	sc.record("the read-only Caller calling the move Tool gets "+want,
 		err != nil && strings.Contains(err.Error(), want),
 		fmt.Sprintf("error %q, Tool error %q", errText(err), toolErr))
 	return sc

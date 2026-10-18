@@ -234,14 +234,16 @@ func TestRealWriteSendsTheKeyAndExpectedQuantityToShopify(t *testing.T) {
 	}
 }
 
-// concurrentRequestResponse is NOT a recording. Several identical writes
-// sent to the dev store at once never produced Shopify's
-// IDEMPOTENCY_CONCURRENT_REQUEST error, so this response is based on
-// Shopify's documentation instead: the 2026-10 schema lists the code in
-// InventorySetQuantitiesUserErrorCode as "This request is currently in
-// progress, please try again." It is the recorded stale-quantity response
-// with that code and message swapped in.
-func concurrentRequestResponse(t *testing.T, h *harness) []byte {
+// setRefusal is NOT a recording. It answers a real write with a user error
+// that couldn't be produced on the dev store, built from Shopify's
+// documentation instead: code and message are as the 2026-10 schema lists
+// them in InventorySetQuantitiesUserErrorCode. Several identical writes
+// sent to the dev store at once never produced
+// IDEMPOTENCY_CONCURRENT_REQUEST, and IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED
+// was never seen: a move resent after a user error got that user error
+// again. It is the recorded stale-quantity response with that one user
+// error swapped in.
+func setRefusal(t *testing.T, h *harness, code, message string) []byte {
 	t.Helper()
 	stale := h.store.recorded(t, "set_inventory_quantity_stale").response
 	var resp map[string]any
@@ -249,11 +251,7 @@ func concurrentRequestResponse(t *testing.T, h *harness) []byte {
 		t.Fatal(err)
 	}
 	payload := resp["data"].(map[string]any)["inventorySetQuantities"].(map[string]any)
-	payload["userErrors"] = []any{map[string]any{
-		"field":   nil,
-		"message": "This request is currently in progress, please try again.",
-		"code":    "IDEMPOTENCY_CONCURRENT_REQUEST",
-	}}
+	payload["userErrors"] = []any{map[string]any{"field": nil, "message": message, "code": code}}
 	b, err := json.Marshal(resp)
 	if err != nil {
 		t.Fatal(err)
@@ -278,11 +276,19 @@ func TestShopifyRefusalsBecomePlainToolErrors(t *testing.T) {
 		"concurrent request": {
 			answer: func(t *testing.T, h *harness) {
 				f := h.store.recorded(t, "set_inventory_quantity_applied")
-				h.store.answer(f.query, concurrentRequestResponse(t, h))
+				h.store.answer(f.query, setRefusal(t, h, "IDEMPOTENCY_CONCURRENT_REQUEST", "This request is currently in progress, please try again."))
 			},
 			// Worded like a rate-limited call: marked retryable, ending with a wait.
 			want:      []string{"a call with this idempotency_key is still in progress", "same idempotency_key", "Retry the same call in 2s"},
 			retryable: true,
+		},
+		"previous attempt failed": {
+			answer: func(t *testing.T, h *harness) {
+				f := h.store.recorded(t, "set_inventory_quantity_applied")
+				h.store.answer(f.query, setRefusal(t, h, "IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED", "A previous request with this idempotency key failed. Retry with a new idempotency key."))
+			},
+			// The same wording as for move_inventory_quantity.
+			want: []string{"an earlier call with this idempotency_key failed", "Nothing was changed", "Run a dry run", "new idempotency_key"},
 		},
 	}
 	for name, tt := range tests {

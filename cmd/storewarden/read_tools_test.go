@@ -195,16 +195,22 @@ func TestGetInventoryReturnsEachLocation(t *testing.T) {
 	want := map[string]any{
 		"levels": []any{
 			map[string]any{
-				"location_id":   "gid://shopify/Location/85565997217",
-				"location_name": "Shop location",
-				"available":     50.0,
-				"on_hand":       50.0,
+				"location_id":     "gid://shopify/Location/85565997217",
+				"location_name":   "Shop location",
+				"available":       50.0,
+				"on_hand":         50.0,
+				"damaged":         0.0,
+				"quality_control": 0.0,
+				"safety_stock":    0.0,
 			},
 			map[string]any{
-				"location_id":   "gid://shopify/Location/85566029985",
-				"location_name": "My Custom Location",
-				"available":     50.0,
-				"on_hand":       50.0,
+				"location_id":     "gid://shopify/Location/85566029985",
+				"location_name":   "My Custom Location",
+				"available":       50.0,
+				"on_hand":         50.0,
+				"damaged":         0.0,
+				"quality_control": 0.0,
+				"safety_stock":    0.0,
 			},
 		},
 	}

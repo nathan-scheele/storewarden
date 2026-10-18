@@ -57,6 +57,11 @@ func Audited(log *audit.Log) mcp.Middleware {
 
 			var usage shopifyUsage
 			start := time.Now()
+			// Every query the Tool makes is charged to the Caller's Quota,
+			// which is kept per node. The Quota is checked only after the
+			// attempt record, so a refusal leaves an attempt and a result
+			// record.
+			ctx = shopify.WithQuotaKey(ctx, string(caller.NodeID))
 			res, err := next(shopify.WithObserver(ctx, usage.add), method, req)
 
 			rec.Time = time.Time{} // Write stamps the result's own time
