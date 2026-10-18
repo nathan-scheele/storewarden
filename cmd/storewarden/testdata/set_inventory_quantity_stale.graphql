@@ -1,0 +1,26 @@
+mutation SetAvailableQuantity($inventoryItemId: ID!, $locationId: ID!, $quantity: Int!, $expectedQuantity: Int!, $referenceDocumentUri: String!, $idempotencyKey: String!) {
+  inventorySetQuantities(
+    input: {
+      name: "available"
+      reason: "correction"
+      referenceDocumentUri: $referenceDocumentUri
+      quantities: [
+        {
+          inventoryItemId: $inventoryItemId
+          locationId: $locationId
+          quantity: $quantity
+          changeFromQuantity: $expectedQuantity
+        }
+      ]
+    }
+  ) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup {
+      id
+    }
+    userErrors {
+      field
+      message
+      code
+    }
+  }
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -228,6 +229,74 @@ func TestRealWriteSendsTheKeyAndExpectedQuantityToShopify(t *testing.T) {
 	}
 	if !reflect.DeepEqual(m.Variables, wantVars) {
 		t.Errorf("mutation variables =\n%v\nwant\n%v", m.Variables, wantVars)
+	}
+}
+
+// concurrentRequestResponse is NOT a recording. Several identical writes
+// sent to the dev store at once never produced Shopify's
+// IDEMPOTENCY_CONCURRENT_REQUEST error, so this response is based on
+// Shopify's documentation instead: the 2026-10 schema lists the code in
+// InventorySetQuantitiesUserErrorCode as "This request is currently in
+// progress, please try again." It is the recorded stale-quantity response
+// with that code and message swapped in.
+func concurrentRequestResponse(t *testing.T, h *harness) []byte {
+	t.Helper()
+	stale := h.store.recorded(t, "set_inventory_quantity_stale").response
+	var resp map[string]any
+	if err := json.Unmarshal(stale, &resp); err != nil {
+		t.Fatal(err)
+	}
+	payload := resp["data"].(map[string]any)["inventorySetQuantities"].(map[string]any)
+	payload["userErrors"] = []any{map[string]any{
+		"field":   nil,
+		"message": "This request is currently in progress, please try again.",
+		"code":    "IDEMPOTENCY_CONCURRENT_REQUEST",
+	}}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestShopifyRefusalsBecomePlainToolErrors(t *testing.T) {
+	tests := map[string]struct {
+		answer    func(t *testing.T, h *harness)
+		want      []string
+		retryable bool
+	}{
+		"stale quantity": {
+			answer: func(t *testing.T, h *harness) { h.answerMutation(t, "set_inventory_quantity_stale") },
+			want:   []string{"the available quantity is no longer expected_quantity", "Nothing was changed", "dry run"},
+		},
+		"key reused with different input": {
+			answer: func(t *testing.T, h *harness) { h.answerMutation(t, "set_inventory_quantity_key_mismatch") },
+			want:   []string{"idempotency_key was already used with different input", "Nothing was changed", "new idempotency_key"},
+		},
+		"concurrent request": {
+			answer: func(t *testing.T, h *harness) {
+				f := h.store.recorded(t, "set_inventory_quantity_applied")
+				h.store.answer(f.query, concurrentRequestResponse(t, h))
+			},
+			want:      []string{"a call with this idempotency_key is still in progress", "same idempotency_key"},
+			retryable: true,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, grantedTo(inventoryWriter))
+			tt.answer(t, h)
+
+			got := callToolError(t, h.connect(t), "set_inventory_quantity", realWrite())
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("error = %q, want it to say %q", got, w)
+				}
+			}
+			if retryable := strings.HasPrefix(got, "retryable: "); retryable != tt.retryable {
+				t.Errorf("error = %q, marked retryable: %v, want %v", got, retryable, tt.retryable)
+			}
+		})
 	}
 }
 

@@ -1,0 +1,25 @@
+{
+  "data": {
+    "inventorySetQuantities": {
+      "inventoryAdjustmentGroup": null,
+      "userErrors": [
+        {
+          "field": null,
+          "message": "The request with this idempotency key has different parameters than the original request.",
+          "code": "IDEMPOTENCY_KEY_PARAMETER_MISMATCH"
+        }
+      ]
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 10,
+      "actualQueryCost": 10,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19990,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

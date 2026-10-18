@@ -208,5 +208,30 @@ func setAvailableQuantity(ctx context.Context, client *shopify.Client, in SetInv
 	// user errors as an error, and no error means the change was made.
 	var data struct{}
 	_, err := client.Query(ctx, setAvailableQuantityMutation, variables, &data)
+	return plainWriteError(err)
+}
+
+// plainWriteError turns Shopify's refusals of a real write, which come back
+// as user errors with these codes, into errors that tell the Caller what to
+// do next. The one refusal worth retrying unchanged is marked by starting
+// with "retryable: ". Any other error is returned as it is.
+func plainWriteError(err error) error {
+	var userErrs shopify.UserErrors
+	if !errors.As(err, &userErrs) {
+		return err
+	}
+	for _, ue := range userErrs {
+		switch ue.Code {
+		case "CHANGE_FROM_QUANTITY_STALE":
+			return errors.New("the available quantity is no longer expected_quantity: it changed since you read it. " +
+				"Nothing was changed. Run a dry run to see the current quantity, then make the change with that as expected_quantity and a new idempotency_key.")
+		case "IDEMPOTENCY_KEY_PARAMETER_MISMATCH":
+			return errors.New("idempotency_key was already used with different input. " +
+				"Nothing was changed. Use a new idempotency_key for each new change, and reuse a key only to retry exactly the same call.")
+		case "IDEMPOTENCY_CONCURRENT_REQUEST":
+			return errors.New("retryable: a call with this idempotency_key is still in progress, so this call changed nothing itself. " +
+				"Retry exactly the same call, with the same idempotency_key, in a few seconds; Shopify makes the change only once.")
+		}
+	}
 	return err
 }
