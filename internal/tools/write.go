@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nathan-scheele/storewarden/internal/audit"
 	"github.com/nathan-scheele/storewarden/internal/shopify"
 )
 
@@ -46,6 +47,12 @@ func checkExpected(field string, expected *int) error {
 		return fmt.Errorf("%s is required when dry_run is false; run a dry run to see the current quantity", field)
 	}
 	return nil
+}
+
+// auditURI returns the URI that links a real write in Shopify's inventory
+// history back to this call's Audit records.
+func auditURI(ctx context.Context) string {
+	return "storewarden://audit/" + audit.RequestID(ctx)
 }
 
 // levelQuantities runs query, which reads an inventory item's named

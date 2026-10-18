@@ -165,7 +165,7 @@ func setAvailableQuantity(ctx context.Context, client *shopify.Client, in SetInv
 		"locationId":           in.LocationID,
 		"quantity":             in.Quantity,
 		"expectedQuantity":     *in.ExpectedQuantity,
-		"referenceDocumentUri": "storewarden://audit/" + audit.RequestID(ctx),
+		"referenceDocumentUri": auditURI(ctx),
 		"idempotencyKey":       in.IdempotencyKey,
 	}
 	// The Tool needs nothing from the response: Query returns Shopify's

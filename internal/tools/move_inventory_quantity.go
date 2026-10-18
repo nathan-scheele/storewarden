@@ -219,7 +219,7 @@ func moveInventoryQuantity(client *shopify.Client) mcp.ToolHandlerFor[MoveInvent
 // through the reference document URI, which is also the ledger document
 // URI on the non-available side.
 func moveQuantity(ctx context.Context, client *shopify.Client, in MoveInventoryQuantityInput) error {
-	uri := "storewarden://audit/" + audit.RequestID(ctx)
+	uri := auditURI(ctx)
 	variables := map[string]any{
 		"inventoryItemId":       in.InventoryItemID,
 		"locationId":            in.LocationID,
