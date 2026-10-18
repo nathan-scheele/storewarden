@@ -5,7 +5,8 @@ package main
 // item and location the "tools" command picked. It moves 1 unit from
 // available to damaged through a Dry run, a real move, a retry with the same
 // Idempotency key and a move with stale Expected quantities, tries to move
-// more than damaged holds, and finally moves the unit back.
+// more than damaged holds, honestly and then with a dishonest Expected
+// quantity, and finally moves the unit back.
 
 import (
 	"context"
@@ -93,17 +94,23 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 	sc.record(executed, err == nil && done.Applied && !done.DryRun && now == moved,
 		fmt.Sprintf("applied=%t, then %s %s; request_id %s", done.Applied, now, errText(err), done.RequestID))
 
-	// The same call again, with the same key, must not move twice.
+	// The same call again, with the same key, must not move twice. A
+	// retried set_inventory_quantity has come back both ways (docs/design.md,
+	// Write semantics), so either answer passes, and the check's name says
+	// which one came back. A fresh read shows whether anything moved again.
 	var again tools.InventoryMove
 	toolErr, err := s.call(ctx, moveTool, execute, &again)
-	seen := "returned the original result"
-	if toolErr != "" {
-		seen = "Tool error: " + toolErr
+	retried := "an error"
+	switch {
+	case err == nil && toolErr == "":
+		retried = "the original result"
+	case strings.HasPrefix(toolErr, staleMoveText):
+		retried = "the stale-quantity error"
 	}
 	now, statesErr := s.readStates(ctx, item, location)
-	sc.record("retrying the move with the same key doesn't move again",
+	sc.record("retrying the move with the same key doesn't move again; it got "+retried,
 		err == nil && (toolErr == "" || strings.HasPrefix(toolErr, staleMoveText)) && statesErr == nil && now == moved,
-		fmt.Sprintf("%s; then %s %s", seen, now, errText(err, statesErr)))
+		fmt.Sprintf("Tool error %q; then %s %s", toolErr, now, errText(err, statesErr)))
 
 	// A new move based on the old read is refused.
 	stale := realMove(toDamaged, newKey(), before.available, before.damaged)
@@ -114,31 +121,45 @@ func runMove(ctx context.Context, s session, item, location string) scenario {
 		err == nil && strings.HasPrefix(toolErr, staleMoveText) && statesErr == nil && now == moved,
 		fmt.Sprintf("Tool error %q; then %s %s", toolErr, now, errText(err, statesErr)))
 
-	// More than damaged holds. With honest Expected quantities storewarden
-	// refuses it itself. With expected_from_quantity inflated to match, the
-	// move reaches Shopify, and its answer is recorded.
+	// More than damaged holds, with honest Expected quantities: storewarden
+	// refuses it itself, before Shopify.
 	fromDamaged := tools.MoveInventoryQuantityInput{
 		InventoryItemID: item, LocationID: location, From: "damaged", To: "available", Quantity: moved.damaged + 1,
 	}
 	honest := realMove(fromDamaged, newKey(), moved.damaged, moved.available)
 	var over tools.InventoryMove
-	honestErr, err := s.call(ctx, moveTool, honest, &over)
-	inflated := realMove(fromDamaged, newKey(), fromDamaged.Quantity, moved.available)
-	shopifyErr, inflatedErr := s.call(ctx, moveTool, inflated, &over)
+	toolErr, err = s.call(ctx, moveTool, honest, &over)
 	now, statesErr = s.readStates(ctx, item, location)
-	// The check's name carries Shopify's answer, so that the results table
-	// records it.
-	answer := "an error"
-	switch {
-	case inflatedErr == nil && shopifyErr == "":
-		answer = "the move was made"
-	case strings.HasPrefix(shopifyErr, staleMoveText):
-		answer = "the stale-quantity error"
+	sc.record("a move of more than damaged holds is refused by storewarden and changes nothing",
+		err == nil && strings.Contains(toolErr, overMoveText) && statesErr == nil && now == moved,
+		fmt.Sprintf("Tool error %q; then %s %s", toolErr, now, errText(err, statesErr)))
+
+	// The same move with a dishonest expected_from_quantity, claiming
+	// damaged holds enough, gets past storewarden's check. damaged doesn't
+	// hold that many, so Shopify's compare-and-swap check refuses it as
+	// stale. This can't show what Shopify does with an honest move of more
+	// than a state holds: recording the move fixtures showed that, and
+	// README.md (move_inventory_quantity) and docs/design.md (Write
+	// semantics) record it.
+	dishonest := realMove(fromDamaged, newKey(), fromDamaged.Quantity, moved.available)
+	var claimed tools.InventoryMove
+	toolErr, err = s.call(ctx, moveTool, dishonest, &claimed)
+	now, statesErr = s.readStates(ctx, item, location)
+	detail := fmt.Sprintf("with expected_from_quantity %d: Tool error %q; then %s %s",
+		*dishonest.ExpectedFromQuantity, toolErr, now, errText(err, statesErr))
+	if statesErr == nil && now.available > moved.available {
+		// Shopify made the move after all. Move the units back, so that the
+		// round trip still leaves the Store as it found it; the check fails
+		// either way.
+		undo := toDamaged
+		undo.Quantity = now.available - moved.available
+		undoToolErr, undoErr := s.call(ctx, moveTool, realMove(undo, newKey(), now.available, now.damaged), &tools.InventoryMove{})
+		undone, undoneErr := s.readStates(ctx, item, location)
+		detail += fmt.Sprintf("; moved %d back: Tool error %q; then %s %s",
+			undo.Quantity, undoToolErr, undone, errText(undoErr, undoneErr))
 	}
-	sc.record("a move of more than damaged holds is refused by storewarden and changes nothing; claiming damaged holds enough, Shopify's answer is "+answer,
-		err == nil && strings.Contains(honestErr, overMoveText) && inflatedErr == nil && shopifyErr != "" && statesErr == nil && now == moved,
-		fmt.Sprintf("with honest expected quantities: Tool error %q; with expected_from_quantity %d, Shopify answered: %q; then %s %s",
-			honestErr, inflated.Quantity, shopifyErr, now, errText(err, inflatedErr, statesErr)))
+	sc.record("a move claiming damaged holds more than it does is refused by Shopify as stale and changes nothing",
+		err == nil && strings.HasPrefix(toolErr, staleMoveText) && statesErr == nil && now == moved, detail)
 
 	// Move the unit back.
 	back := realMove(tools.MoveInventoryQuantityInput{

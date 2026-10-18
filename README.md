@@ -589,9 +589,10 @@ It gives you each policy file to paste.
 - for the same item, moving 1 unit from available to damaged:
   - a move with no `dry_run` is a Dry run of both states and changes nothing;
   - executing with an `idempotency_key` and both Expected quantities makes the move;
-  - retrying the same call with the same key doesn't move again;
+  - retrying the same call with the same key doesn't move again, and the results say whether it got the original result or the stale-quantity error;
   - a new move with the old Expected quantities gets the stale-quantity error and changes nothing;
-  - a move of more than damaged holds is refused by storewarden, and, claiming damaged holds enough, what Shopify answers is recorded in the results;
+  - a move of more than damaged holds is refused by storewarden and changes nothing;
+  - the same move with an `expected_from_quantity` claiming damaged holds enough is refused by Shopify as stale and changes nothing. What Shopify does with an honest move of more than a state holds is recorded under [move_inventory_quantity](#move_inventory_quantity), not tested here;
   - the unit is moved back;
 - the change and the move show in Shopify's inventory history with their `storewarden://audit/<request_id>` references, and the move with reason `damaged`. You check these in the Shopify admin; the wizard prints the link;
 - the read-only Caller doesn't see either Write tool, and calling them gives `unknown tool "set_inventory_quantity"` and `unknown tool "move_inventory_quantity"`;
