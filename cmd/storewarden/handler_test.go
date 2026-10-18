@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -58,14 +60,56 @@ func grantedTo(values ...string) fakeWhoIs {
 	}
 }
 
-// fakeShopify serves the client credentials grant and answers every GraphQL
-// query with the response recorded in testdata.
-func fakeShopify(t *testing.T) *httptest.Server {
+// fixture is a response recorded from the dev store by
+// scripts/record-fixture.sh, with the query and variables that produced it.
+type fixture struct {
+	name      string
+	query     string
+	variables map[string]any
+	response  []byte
+}
+
+// loadFixtures reads every recorded response in testdata.
+func loadFixtures(t *testing.T) []fixture {
 	t.Helper()
-	recorded, err := os.ReadFile("testdata/shop.json")
+	queries, err := filepath.Glob("testdata/*.graphql")
 	if err != nil {
 		t.Fatal(err)
 	}
+	var fixtures []fixture
+	for _, q := range queries {
+		name := strings.TrimSuffix(q, ".graphql")
+		query, err := os.ReadFile(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := os.ReadFile(name + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := fixture{name: name, query: strings.TrimSpace(string(query)), response: response}
+		// A query recorded without variables has no variables file.
+		if vars, err := os.ReadFile(name + ".variables.json"); err == nil {
+			if err := json.Unmarshal(vars, &f.variables); err != nil {
+				t.Fatalf("%s.variables.json: %v", name, err)
+			}
+		}
+		fixtures = append(fixtures, f)
+	}
+	return fixtures
+}
+
+// fakeShopify serves the client credentials grant and answers each GraphQL
+// query with the response recorded for the same query and variables.
+type fakeShopify struct {
+	*httptest.Server
+	queries atomic.Int64 // GraphQL requests received
+}
+
+func newFakeShopify(t *testing.T) *fakeShopify {
+	t.Helper()
+	fixtures := loadFixtures(t)
+	store := &fakeShopify{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /admin/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
 		if r.PostFormValue("grant_type") != "client_credentials" ||
@@ -82,16 +126,32 @@ func fakeShopify(t *testing.T) *httptest.Server {
 		})
 	})
 	mux.HandleFunc("POST /admin/api/2026-10/graphql.json", func(w http.ResponseWriter, r *http.Request) {
+		store.queries.Add(1)
 		if r.Header.Get("X-Shopify-Access-Token") != testToken {
 			http.Error(w, "bad token", http.StatusUnauthorized)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(recorded)
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		for _, f := range fixtures {
+			if strings.TrimSpace(req.Query) == f.query && reflect.DeepEqual(req.Variables, f.variables) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(f.response)
+				return
+			}
+		}
+		t.Errorf("no recorded response for query %q with variables %v", req.Query, req.Variables)
+		http.Error(w, "no recorded response", http.StatusInternalServerError)
 	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
+	store.Server = httptest.NewServer(mux)
+	t.Cleanup(store.Close)
+	return store
 }
 
 // syncBuffer is a bytes.Buffer that is safe to write from server goroutines.
@@ -113,8 +173,9 @@ func (b *syncBuffer) String() string {
 }
 
 type harness struct {
-	url  string
-	logs *syncBuffer
+	url   string
+	logs  *syncBuffer
+	store *fakeShopify
 }
 
 // newHarness starts the assembled server handler with the given WhoIs, a
@@ -123,10 +184,11 @@ func newHarness(t *testing.T, whois authz.WhoIser) *harness {
 	t.Helper()
 	logs := &syncBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	client := shopify.New(fakeShopify(t).URL, testClientID, testClientSecret, nil)
+	store := newFakeShopify(t)
+	client := shopify.New(store.URL, testClientID, testClientSecret, nil)
 	srv := httptest.NewServer(newHandler(whois, client, logger))
 	t.Cleanup(srv.Close)
-	return &harness{url: srv.URL, logs: logs}
+	return &harness{url: srv.URL, logs: logs, store: store}
 }
 
 func (h *harness) connect(t *testing.T) *mcp.ClientSession {
