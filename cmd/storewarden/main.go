@@ -111,7 +111,11 @@ func run() error {
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
-	logger.Info("serving MCP", "store", *store, "hostname", *hostname, "tailscale_ips", status.TailscaleIPs)
+	tailnet := ""
+	if status.CurrentTailnet != nil {
+		tailnet = status.CurrentTailnet.Name
+	}
+	logger.Info("serving MCP", "store", *store, "hostname", *hostname, "tailnet", tailnet, "tailscale_ips", status.TailscaleIPs)
 
 	select {
 	case err := <-serveErr:

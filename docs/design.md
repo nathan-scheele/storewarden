@@ -35,6 +35,7 @@ Nothing else outside the standard library: `log/slog`, `net/http`, `encoding/jso
 ```
 cmd/storewarden/main.go   flags, tsnet, wiring, graceful shutdown
 cmd/storewarden/handler.go  the assembled HTTP handler (the primary test seam)
+cmd/storewarden-smoke     test Caller for the manual smoke test (scripts/smoke-tailnet.sh)
 internal/authz            WhoIs → Caller + allowed Tools; HTTP + MCP middleware
 internal/audit            Audit record writer (JSON Lines, fail closed)
 internal/shopify          GraphQL client, token source, cost throttle
