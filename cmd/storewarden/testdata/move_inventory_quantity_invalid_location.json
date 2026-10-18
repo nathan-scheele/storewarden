@@ -1,0 +1,42 @@
+{
+  "data": {
+    "inventoryMoveQuantities": {
+      "inventoryAdjustmentGroup": null,
+      "userErrors": [
+        {
+          "field": [
+            "input",
+            "changes",
+            "0",
+            "from",
+            "locationId"
+          ],
+          "message": "The specified location could not be found.",
+          "code": "INVALID_LOCATION"
+        },
+        {
+          "field": [
+            "input",
+            "changes",
+            "0",
+            "to",
+            "locationId"
+          ],
+          "message": "The specified location could not be found.",
+          "code": "INVALID_LOCATION"
+        }
+      ]
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 10,
+      "actualQueryCost": 10,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19990,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}

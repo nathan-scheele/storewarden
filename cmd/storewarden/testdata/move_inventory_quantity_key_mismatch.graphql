@@ -1,0 +1,35 @@
+mutation MoveQuantity($inventoryItemId: ID!, $locationId: ID!, $quantity: Int!, $from: String!, $to: String!, $expectedFromQuantity: Int!, $expectedToQuantity: Int!, $reason: String!, $referenceDocumentUri: String!, $fromLedgerDocumentUri: String, $toLedgerDocumentUri: String, $idempotencyKey: String!) {
+  inventoryMoveQuantities(
+    input: {
+      reason: $reason
+      referenceDocumentUri: $referenceDocumentUri
+      changes: [
+        {
+          inventoryItemId: $inventoryItemId
+          quantity: $quantity
+          from: {
+            locationId: $locationId
+            name: $from
+            changeFromQuantity: $expectedFromQuantity
+            ledgerDocumentUri: $fromLedgerDocumentUri
+          }
+          to: {
+            locationId: $locationId
+            name: $to
+            changeFromQuantity: $expectedToQuantity
+            ledgerDocumentUri: $toLedgerDocumentUri
+          }
+        }
+      ]
+    }
+  ) @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup {
+      id
+    }
+    userErrors {
+      field
+      message
+      code
+    }
+  }
+}

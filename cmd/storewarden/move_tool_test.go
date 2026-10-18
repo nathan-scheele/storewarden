@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -197,31 +198,6 @@ func TestMoveAuditRecords(t *testing.T) {
 	})
 }
 
-func TestRefusedRealMoveAuditRecords(t *testing.T) {
-	h := newWriteHarness(t, grantedTo(inventoryMover))
-	callToolError(t, h.connect(t), "move_inventory_quantity", realMove())
-
-	recs := h.audit.records(t)
-	if len(recs) != 2 {
-		t.Fatalf("got %d audit records, want attempt and result:\n%s", len(recs), h.audit)
-	}
-	for _, rec := range recs {
-		checkFields(t, rec, map[string]any{
-			"tool":            "move_inventory_quantity",
-			"args":            realMove(),
-			"dry_run":         false,
-			"idempotency_key": testKey,
-		})
-	}
-	checkFields(t, recs[1], map[string]any{"outcome": "error"})
-	if got, _ := recs[1]["error"].(string); !strings.Contains(got, "not supported yet") {
-		t.Errorf("result error = %q, want it to say not supported yet", got)
-	}
-	if _, ok := recs[1]["shopify"]; ok {
-		t.Errorf("result record has Shopify fields, but Shopify wasn't called: %v", recs[1]["shopify"])
-	}
-}
-
 func TestMoveDryRunRecordsHoldNoResponseBodies(t *testing.T) {
 	h := newWriteHarness(t, grantedTo(inventoryMover))
 	// 44 is the recorded available quantity. The planted one is long
@@ -249,19 +225,326 @@ func realMove() map[string]any {
 	return args
 }
 
-// Real moves come in a later version; until then, opting out of a Dry run
-// changes nothing.
-func TestRealMoveIsNotSupportedYet(t *testing.T) {
-	h := newWriteHarness(t, grantedTo(inventoryMover))
+func TestRealMoveNeedsAKeyAndBothExpectedQuantities(t *testing.T) {
+	tests := map[string]struct {
+		change func(args map[string]any)
+		want   string
+	}{
+		"no key":           {func(a map[string]any) { delete(a, "idempotency_key") }, "idempotency_key is required when dry_run is false"},
+		"blank key":        {func(a map[string]any) { a["idempotency_key"] = "  " }, "idempotency_key is required when dry_run is false"},
+		"long key":         {func(a map[string]any) { a["idempotency_key"] = strings.Repeat("k", 256) }, "idempotency_key must be at most 255 characters"},
+		"no expected from": {func(a map[string]any) { delete(a, "expected_from_quantity") }, "expected_from_quantity is required when dry_run is false"},
+		"no expected to":   {func(a map[string]any) { delete(a, "expected_to_quantity") }, "expected_to_quantity is required when dry_run is false"},
+		"neither expected": {func(a map[string]any) { delete(a, "expected_from_quantity"); delete(a, "expected_to_quantity") }, "expected_from_quantity is required when dry_run is false"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, grantedTo(inventoryMover))
+			args := realMove()
+			tt.change(args)
 
-	got := callToolError(t, h.connect(t), "move_inventory_quantity", realMove())
-	for _, want := range []string{"not supported yet", "dry_run"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("error = %q, want it to say %q", got, want)
-		}
+			got := callToolError(t, h.connect(t), "move_inventory_quantity", args)
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("error = %q, want it to say %q", got, tt.want)
+			}
+			if n := h.store.queries.Load(); n != 0 {
+				t.Errorf("Shopify got %d queries, want none", n)
+			}
+		})
+	}
+}
+
+// The move_inventory_quantity_applied recording moved 3 units from
+// available to damaged where 50 and 0 were expected, as realMove does.
+
+func TestRealMoveIsMadeAndReportsBothStates(t *testing.T) {
+	h := newWriteHarness(t, grantedTo(inventoryMover))
+	h.answerMutation(t, "move_inventory_quantity_applied")
+
+	got := callTool(t, h.connect(t), "move_inventory_quantity", realMove())
+	recs := h.audit.records(t)
+	if len(recs) == 0 {
+		t.Fatal("no audit records")
+	}
+	want := map[string]any{
+		"dry_run":    false,
+		"from":       map[string]any{"current": 50.0, "new": 47.0}, // Shopify checked both were expected
+		"to":         map[string]any{"current": 0.0, "new": 3.0},
+		"applied":    true,
+		"request_id": recs[0]["request_id"],
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("move_inventory_quantity =\n%v\nwant\n%v", got, want)
+	}
+	// Shopify checks the quantities itself, so nothing is read first.
+	if n := h.store.queries.Load(); n != 1 {
+		t.Errorf("Shopify got %d queries, want only the move", n)
+	}
+}
+
+func TestRealMoveSendsBothExpectedQuantitiesTheKeyAndItsReferences(t *testing.T) {
+	tests := map[string]struct {
+		from, to string
+		reason   string
+		// Shopify takes a ledger document URI on the non-available side
+		// only, and refuses one on available.
+		fromLedger, toLedger bool
+	}{
+		"available to damaged":         {"available", "damaged", "damaged", false, true},
+		"available to safety_stock":    {"available", "safety_stock", "safety_stock", false, true},
+		"quality_control to available": {"quality_control", "available", "quality_control", true, false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, grantedTo(inventoryMover))
+			h.answerMutation(t, "move_inventory_quantity_applied")
+			args := realMove()
+			args["from"], args["to"] = tt.from, tt.to
+
+			callTool(t, h.connect(t), "move_inventory_quantity", args)
+			recs := h.audit.records(t)
+			if len(recs) == 0 {
+				t.Fatal("no audit records")
+			}
+			uri := "storewarden://audit/" + recs[0]["request_id"].(string)
+
+			mutations := h.store.mutations()
+			if len(mutations) != 1 {
+				t.Fatalf("Shopify received %d mutations, want 1", len(mutations))
+			}
+			m := mutations[0]
+			for _, part := range []string{
+				"inventoryMoveQuantities(",
+				"reason: $reason",
+				"referenceDocumentUri: $referenceDocumentUri",
+				"changeFromQuantity: $expectedFromQuantity",
+				"changeFromQuantity: $expectedToQuantity",
+				"@idempotent(key: $idempotencyKey)",
+				// Never null, so both compare-and-swap checks always run.
+				"$expectedFromQuantity: Int!",
+				"$expectedToQuantity: Int!",
+			} {
+				if !strings.Contains(m.Query, part) {
+					t.Errorf("mutation has no %q:\n%s", part, m.Query)
+				}
+			}
+			ledger := func(on bool) any {
+				if on {
+					return uri
+				}
+				return nil
+			}
+			wantVars := map[string]any{
+				"inventoryItemId":       testInventoryItem,
+				"locationId":            testLocation,
+				"quantity":              3.0,
+				"from":                  tt.from,
+				"to":                    tt.to,
+				"expectedFromQuantity":  50.0,
+				"expectedToQuantity":    0.0,
+				"reason":                tt.reason,
+				"referenceDocumentUri":  uri,
+				"fromLedgerDocumentUri": ledger(tt.fromLedger),
+				"toLedgerDocumentUri":   ledger(tt.toLedger),
+				"idempotencyKey":        testKey,
+			}
+			if !reflect.DeepEqual(m.Variables, wantVars) {
+				t.Errorf("mutation variables =\n%v\nwant\n%v", m.Variables, wantVars)
+			}
+		})
+	}
+}
+
+func TestRealMoveAuditRecords(t *testing.T) {
+	h := newWriteHarness(t, grantedTo(inventoryMover))
+	// The adjustment group's ID is only in Shopify's response.
+	const planted = "AdjustmentGroup/9182736450"
+	h.store.replaceInResponses("AdjustmentGroup/49286662914209", planted)
+	h.answerMutation(t, "move_inventory_quantity_applied")
+	if !strings.Contains(string(h.store.recorded(t, "move_inventory_quantity_applied").response), planted) {
+		t.Fatal("the planted ID isn't in the response Shopify will send")
+	}
+
+	callTool(t, h.connect(t), "move_inventory_quantity", realMove())
+	recs := h.audit.records(t)
+	if len(recs) != 2 {
+		t.Fatalf("got %d audit records, want attempt and result:\n%s", len(recs), h.audit)
+	}
+	attempt, result := recs[0], recs[1]
+	// args holds both Inventory states, the quantity and both Expected
+	// quantities, as the Caller sent them.
+	common := map[string]any{
+		"tool":            "move_inventory_quantity",
+		"args":            realMove(),
+		"decision":        "allow",
+		"dry_run":         false,
+		"idempotency_key": testKey,
+	}
+	checkFields(t, attempt, common)
+	checkFields(t, result, common)
+	checkFields(t, result, map[string]any{
+		"phase":   "result",
+		"outcome": "ok",
+		"error":   "",
+		"shopify": map[string]any{
+			"requested_cost": 10,
+			"actual_cost":    10,
+			"request_id":     testShopifyRequestID,
+		},
+	})
+	if strings.Contains(h.audit.String(), planted) {
+		t.Errorf("audit records contain Shopify's response:\n%s", h.audit)
+	}
+}
+
+func TestRealMoveIsRefusedWhenAttemptCantBeRecorded(t *testing.T) {
+	h := newWriteHarness(t, grantedTo(inventoryMover))
+	h.answerMutation(t, "move_inventory_quantity_applied")
+	h.audit.failOn("attempt")
+
+	res, err := h.connect(t).CallTool(t.Context(), &mcp.CallToolParams{Name: "move_inventory_quantity", Arguments: realMove()})
+	if err == nil && !res.IsError {
+		t.Fatalf("move succeeded without an attempt record: %+v", res.StructuredContent)
 	}
 	if n := h.store.queries.Load(); n != 0 {
-		t.Errorf("Shopify got %d queries, want none", n)
+		t.Errorf("Shopify got %d queries for an unaudited move", n)
+	}
+}
+
+// moveRefusal is NOT a recording. It answers a real move with a user error
+// that couldn't be produced on the dev store, built from Shopify's
+// documentation instead: code and message are as the 2026-10 schema lists
+// them in InventoryMoveQuantitiesUserErrorCode. It is the recorded
+// stale-move response with that one user error swapped in.
+func moveRefusal(t *testing.T, h *harness, code, message string) []byte {
+	t.Helper()
+	stale := h.store.recorded(t, "move_inventory_quantity_stale").response
+	var resp map[string]any
+	if err := json.Unmarshal(stale, &resp); err != nil {
+		t.Fatal(err)
+	}
+	payload := resp["data"].(map[string]any)["inventoryMoveQuantities"].(map[string]any)
+	payload["userErrors"] = []any{map[string]any{"field": nil, "message": message, "code": code}}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestShopifyRefusalsOfAMoveBecomePlainToolErrors(t *testing.T) {
+	tests := map[string]struct {
+		answer    func(t *testing.T, h *harness)
+		want      []string
+		retryable bool
+		// What the result record shows, without Shopify's messages.
+		recorded string
+	}{
+		"stale quantity": {
+			answer: func(t *testing.T, h *harness) { h.answerMutation(t, "move_inventory_quantity_stale") },
+			want: []string{"a quantity changed since you read it", "expected_from_quantity", "expected_to_quantity",
+				"Nothing was changed", "Run a dry run", "new idempotency_key"},
+			recorded: "a quantity changed since you read it",
+		},
+		"key reused with different input": {
+			answer:   func(t *testing.T, h *harness) { h.answerMutation(t, "move_inventory_quantity_key_mismatch") },
+			want:     []string{"idempotency_key was already used with different input", "Nothing was changed", "new idempotency_key"},
+			recorded: "idempotency_key was already used with different input",
+		},
+		// Identical calls sent at once couldn't produce this for
+		// set_inventory_quantity, so it isn't tried for moves.
+		"concurrent request": {
+			answer: func(t *testing.T, h *harness) {
+				f := h.store.recorded(t, "move_inventory_quantity_applied")
+				h.store.answer(f.query, moveRefusal(t, h, "IDEMPOTENCY_CONCURRENT_REQUEST", "This request is currently in progress, please try again."))
+			},
+			// The same form as for set_inventory_quantity.
+			want:      []string{"a call with this idempotency_key is still in progress", "same idempotency_key", "Retry the same call in 2s"},
+			retryable: true,
+			recorded:  "retryable: a call with this idempotency_key is still in progress",
+		},
+		// Retrying a move that failed with a user error, with the same key
+		// and input, got that user error again on the dev store, not this.
+		"previous attempt failed": {
+			answer: func(t *testing.T, h *harness) {
+				f := h.store.recorded(t, "move_inventory_quantity_applied")
+				h.store.answer(f.query, moveRefusal(t, h, "IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED", "A previous request with this idempotency key failed. Retry with a new idempotency key."))
+			},
+			want:     []string{"an earlier call with this idempotency_key failed", "Nothing was changed", "Run a dry run", "new idempotency_key"},
+			recorded: "an earlier call with this idempotency_key failed",
+		},
+		"any other refusal": {
+			answer: func(t *testing.T, h *harness) {
+				f := h.store.recorded(t, "move_inventory_quantity_invalid_location")
+				h.store.answer(f.query, f.response)
+			},
+			// Passed through, as for set_inventory_quantity: the Caller
+			// gets Shopify's message, the result record its codes.
+			want:     []string{"The specified location could not be found."},
+			recorded: "shopify: user errors, codes: INVALID_LOCATION, INVALID_LOCATION",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, grantedTo(inventoryMover))
+			tt.answer(t, h)
+
+			got := callToolError(t, h.connect(t), "move_inventory_quantity", realMove())
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("error = %q, want it to say %q", got, w)
+				}
+			}
+			if retryable := strings.HasPrefix(got, "retryable: "); retryable != tt.retryable {
+				t.Errorf("error = %q, marked retryable: %v, want %v", got, retryable, tt.retryable)
+			}
+
+			recs := h.audit.records(t)
+			if len(recs) != 2 {
+				t.Fatalf("got %d audit records, want attempt and result:\n%s", len(recs), h.audit)
+			}
+			checkFields(t, recs[1], map[string]any{"outcome": "error"})
+			if gotRec, _ := recs[1]["error"].(string); !strings.Contains(gotRec, tt.recorded) {
+				t.Errorf("result error = %q, want it to say %q", gotRec, tt.recorded)
+			}
+			for _, message := range []string{"persisted quantity", "different parameters", "currently in progress", "previous request", "could not be found"} {
+				if strings.Contains(h.audit.String(), message) {
+					t.Errorf("audit records contain Shopify's message %q:\n%s", message, h.audit)
+				}
+			}
+		})
+	}
+}
+
+// A Caller can't move more units than it believes the source state holds.
+func TestMovingMoreThanTheExpectedFromQuantityIsRefusedBeforeShopify(t *testing.T) {
+	tests := map[string]struct {
+		from, to     string
+		quantity     int
+		expectedFrom int
+		want         string
+	}{
+		"out of available": {"available", "damaged", 51, 50, "quantity 51 is more than expected_from_quantity 50"},
+		"out of damaged":   {"damaged", "available", 1, 0, "quantity 1 is more than expected_from_quantity 0"},
+		"below zero":       {"available", "safety_stock", 1, -2, "quantity 1 is more than expected_from_quantity -2"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newWriteHarness(t, grantedTo(inventoryMover))
+			args := realMove()
+			args["from"], args["to"], args["quantity"] = tt.from, tt.to, tt.quantity
+			args["expected_from_quantity"] = tt.expectedFrom
+
+			got := callToolError(t, h.connect(t), "move_inventory_quantity", args)
+			for _, want := range []string{tt.want, "Nothing was changed"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("error = %q, want it to say %q", got, want)
+				}
+			}
+			if n := h.store.queries.Load(); n != 0 {
+				t.Errorf("Shopify got %d queries, want none", n)
+			}
+		})
 	}
 }
 
