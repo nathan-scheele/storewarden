@@ -257,7 +257,7 @@ Output: `id`, `title`, `handle`, `status`, `tags`, and `variants`, a list of `{i
 
 Input: `inventory_item_id`, such as `gid://shopify/InventoryItem/123`, from `get_product`.
 
-Output: `levels`, a list of `{location_id, location_name, available, on_hand}`, one for each location that stocks the item, up to 100 locations. `available` is what can be sold. `on_hand` is what is physically there.
+Output: `levels`, a list of `{location_id, location_name, available, on_hand, damaged, quality_control, safety_stock}`, one for each location that stocks the item, up to 100 locations. `available` is what can be sold. `on_hand` is what is physically there. `damaged`, `quality_control` and `safety_stock` are units on hand held out of sale in those Inventory states.
 
 ### set_inventory_quantity
 
