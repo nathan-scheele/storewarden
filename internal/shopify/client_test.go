@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -147,9 +148,24 @@ func answer(body string) func(http.ResponseWriter, string, int) {
 // discard is a logger for tests that don't look at the logs.
 var discard = slog.New(slog.DiscardHandler)
 
-func newTestClient(f *fakeShopify, clock *fakeClock) *Client {
-	c := New(f.URL, testClientID, testClientSecret, nil, discard)
+func newTestClient(t testing.TB, f *fakeShopify, clock *fakeClock) *Client {
+	t.Helper()
+	c := newClient(t, f.URL, testClientSecret, testQuotaShare, discard)
 	c.clock = clock
+	return c
+}
+
+// testQuotaShare is the Quota share the tests' clients use, unless a test
+// chooses another: storewarden's default.
+const testQuotaShare = 0.5
+
+// newClient is New for a test, which fails if New does.
+func newClient(t testing.TB, url, secret string, quotaShare float64, logger *slog.Logger) *Client {
+	t.Helper()
+	c, err := New(url, testClientID, secret, quotaShare, nil, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return c
 }
 
@@ -176,7 +192,7 @@ func mustQuery(t *testing.T, c *Client) *Meta {
 
 func TestTokenIsIssuedOnceAndReused(t *testing.T) {
 	f := newFakeShopify(t, answer(shopBody))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	mustQuery(t, c)
 	mustQuery(t, c)
@@ -192,7 +208,7 @@ func TestTokenIsIssuedOnceAndReused(t *testing.T) {
 func TestTokenIsReissuedFiveMinutesBeforeExpiry(t *testing.T) {
 	f := newFakeShopify(t, answer(shopBody))
 	clock := newFakeClock()
-	c := newTestClient(f, clock)
+	c := newTestClient(t, f, clock)
 
 	mustQuery(t, c)
 	// The token lasts 86399s; 5m01s before then it is still used.
@@ -219,7 +235,7 @@ func TestTokenWithoutExpiryIsKeptFor24Hours(t *testing.T) {
 			f.mu.Unlock()
 			clock := newFakeClock()
 			var logs bytes.Buffer
-			c := New(f.URL, testClientID, testClientSecret, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+			c := newClient(t, f.URL, testClientSecret, testQuotaShare, slog.New(slog.NewTextHandler(&logs, nil)))
 			c.clock = clock
 
 			mustQuery(t, c)
@@ -257,7 +273,7 @@ func refusing(refused ...string) func(http.ResponseWriter, string, int) {
 
 func TestTokenIsReissuedOnceAfter401AndTheRequestRetried(t *testing.T) {
 	f := newFakeShopify(t, refusing("token-1"))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	var data shopData
 	if _, err := c.Query(t.Context(), "query { shop { name } }", testQueryCost, nil, &data); err != nil {
@@ -274,7 +290,7 @@ func TestTokenIsReissuedOnceAfter401AndTheRequestRetried(t *testing.T) {
 
 func TestA401AfterReissueIsAnError(t *testing.T) {
 	f := newFakeShopify(t, refusing("token-1", "token-2", "token-3"))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	if _, err := query(t, c); err == nil {
 		t.Fatal("query succeeded, want an error")
@@ -310,7 +326,7 @@ func concurrently(t *testing.T, c *Client, n int) {
 
 func TestConcurrentCallersShareOneTokenRequest(t *testing.T) {
 	f := newFakeShopify(t, answer(shopBody))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	concurrently(t, c, 20)
 
@@ -324,7 +340,7 @@ func TestGraphQLErrorsAreTyped(t *testing.T) {
 	  {"message": "Field 'nope' doesn't exist on type 'Shop'", "extensions": {"code": "undefinedField"}},
 	  {"message": "Something else"}
 	]}`))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	_, err := query(t, c)
 	var got GraphQLErrors
@@ -345,7 +361,7 @@ func TestUserErrorsAreTypedAndTheDataStillDecoded(t *testing.T) {
 	  "inventoryAdjustmentGroup": null,
 	  "userErrors": [{"field": ["input", "quantities", "0"], "message": "Quantity is stale", "code": "TEST_CODE"}]
 	}}}`))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	var data struct {
 		InventorySetQuantities struct {
@@ -372,7 +388,7 @@ func TestEmptyUserErrorsAreNotAnError(t *testing.T) {
 	  "nodes": [{"id": "gid://shopify/Product/1"}],
 	  "shop": null
 	}}`))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	var data map[string]any
 	if _, err := c.Query(t.Context(), "mutation { x }", testQueryCost, nil, &data); err != nil {
@@ -388,7 +404,7 @@ func TestRequestIDIsReturned(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"errors": [{"message": "Internal error"}]}`)
 	})
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	if resp := mustQuery(t, c); resp.RequestID != "request-1" {
 		t.Errorf("request ID = %q, want request-1", resp.RequestID)
@@ -451,7 +467,7 @@ func queryBy(t *testing.T, c *Client, deadline time.Duration) error {
 func TestBucketIsAssumedFullUntilTheFirstResponse(t *testing.T) {
 	f := newFakeShopify(t, answer(costBody(1000)))
 	clock := newFakeClock()
-	c := newTestClient(f, clock)
+	c := newTestClient(t, f, clock)
 
 	mustQuery(t, c)
 
@@ -465,7 +481,7 @@ func TestWaitsWhenCapacityRefillsBeforeTheDeadline(t *testing.T) {
 	// bucket refills at 50 a second, so the next call needs 1.5s.
 	f := newFakeShopify(t, answer(costBody(25)))
 	clock := newFakeClock()
-	c := newTestClient(f, clock)
+	c := newTestClient(t, f, clock)
 	mustQuery(t, c)
 
 	if err := queryBy(t, c, time.Hour); err != nil {
@@ -485,7 +501,7 @@ func TestWaitsForAQueryTheBucketHasNotSeenBefore(t *testing.T) {
 	// can cost up to 100, so it waits 1.5s for the bucket to refill.
 	f := newFakeShopify(t, answer(costBody(25)))
 	clock := newFakeClock()
-	c := newTestClient(f, clock)
+	c := newTestClient(t, f, clock)
 	mustQuery(t, c)
 
 	var data shopData
@@ -501,7 +517,7 @@ func TestWaitsForAQueryTheBucketHasNotSeenBefore(t *testing.T) {
 func TestBucketRefillsWithTime(t *testing.T) {
 	f := newFakeShopify(t, answer(costBody(25)))
 	clock := newFakeClock()
-	c := newTestClient(f, clock)
+	c := newTestClient(t, f, clock)
 	mustQuery(t, c)
 
 	clock.Advance(time.Second) // 25 + 50 = 75 points: 0.5s still to go
@@ -516,7 +532,7 @@ func TestBucketUpdatesFromEveryResponse(t *testing.T) {
 	// The second response reports a full bucket, so the third call doesn't wait.
 	f := newFakeShopify(t, answers(costBody(25), costBody(1000)))
 	clock := newFakeClock()
-	c := newTestClient(f, clock)
+	c := newTestClient(t, f, clock)
 
 	mustQuery(t, c)
 	mustQuery(t, c) // waits 1.5s
@@ -530,7 +546,7 @@ func TestBucketUpdatesFromEveryResponse(t *testing.T) {
 func TestFailsFastWhenCapacityWontRefillBeforeTheDeadline(t *testing.T) {
 	f := newFakeShopify(t, answer(costBody(25)))
 	clock := newFakeClock()
-	c := newTestClient(f, clock)
+	c := newTestClient(t, f, clock)
 	mustQuery(t, c)
 
 	err := queryBy(t, c, time.Second)
@@ -557,7 +573,7 @@ func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
 	}
 	f := newFakeShopify(t, answers(string(throttled), costBody(0)))
 	clock := newFakeClock()
-	c := newTestClient(f, clock)
+	c := newTestClient(t, f, clock)
 
 	// The recorded query requested 990 points while the bucket held 618,
 	// refilling at 1000 a second, so the retry waits 372ms.
@@ -582,7 +598,7 @@ func TestAThrottledResponseIsRetriedOnceAfterTheWait(t *testing.T) {
 // Audit record counts what both cost.
 func TestTheObserverSeesTheThrottledResponseAndTheRetry(t *testing.T) {
 	f := newFakeShopify(t, answers(throttledBody(25), costBody(0)))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 	var seen []Meta
 	ctx := WithObserver(t.Context(), func(resp *Meta) { seen = append(seen, *resp) })
 
@@ -607,7 +623,7 @@ func TestTheObserverSeesTheThrottledResponseAndTheRetry(t *testing.T) {
 
 func TestAThrottledRetryIsNotRetriedAgain(t *testing.T) {
 	f := newFakeShopify(t, answer(throttledBody(25)))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	resp, err := query(t, c)
 
@@ -628,7 +644,7 @@ func TestAThrottledRetryIsNotRetriedAgain(t *testing.T) {
 
 func TestAThrottledResponseFailsFastWhenTheRetryWouldMissTheDeadline(t *testing.T) {
 	f := newFakeShopify(t, answer(throttledBody(25)))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 
 	err := queryBy(t, c, time.Second)
 
@@ -657,7 +673,7 @@ func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
 	for name, graphql := range failures {
 		t.Run(name, func(t *testing.T) {
 			f := newFakeShopify(t, graphql)
-			c := newTestClient(f, newFakeClock())
+			c := newTestClient(t, f, newFakeClock())
 			_, err := query(t, c)
 			if err == nil {
 				t.Fatal("query succeeded, want an error")
@@ -672,7 +688,7 @@ func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
 
 	t.Run("token request refused", func(t *testing.T) {
 		f := newFakeShopify(t, answer(shopBody))
-		c := New(f.URL, testClientID, "wrong-secret", nil, discard)
+		c := newClient(t, f.URL, "wrong-secret", testQuotaShare, discard)
 		_, err := query(t, c)
 		if err == nil || strings.Contains(err.Error(), "wrong-secret") {
 			t.Errorf("error = %v, want one without the secret", err)
@@ -681,7 +697,7 @@ func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
 
 	t.Run("Shopify unreachable", func(t *testing.T) {
 		f := newFakeShopify(t, answer(shopBody))
-		c := New(f.URL, testClientID, testClientSecret, nil, discard)
+		c := newClient(t, f.URL, testClientSecret, testQuotaShare, discard)
 		f.Close()
 		_, err := query(t, c)
 		if err == nil || strings.Contains(err.Error(), testClientSecret) {
@@ -692,7 +708,7 @@ func TestErrorsNeverCarryCredentialsOrTokens(t *testing.T) {
 
 func TestConcurrentCallersRefusedTogetherShareOneReissue(t *testing.T) {
 	f := newFakeShopify(t, answer(shopBody))
-	c := newTestClient(f, newFakeClock())
+	c := newTestClient(t, f, newFakeClock())
 	mustQuery(t, c) // token-1 is now cached
 	f.mu.Lock()
 	f.graphql = refusing("token-1")
@@ -702,5 +718,19 @@ func TestConcurrentCallersRefusedTogetherShareOneReissue(t *testing.T) {
 
 	if got := f.Issued(); got != 2 {
 		t.Errorf("tokens issued = %d, want 2 (the first and one reissue)", got)
+	}
+}
+
+func TestQuotaShareMustBeAboveZeroAndAtMostOne(t *testing.T) {
+	const store = "https://storewarden-dev.myshopify.com"
+	for _, share := range []float64{0, -0.5, 1.01, math.NaN()} {
+		if _, err := New(store, testClientID, testClientSecret, share, nil, discard); err == nil {
+			t.Errorf("New with Quota share %v succeeded, want an error", share)
+		}
+	}
+	for _, share := range []float64{0.01, 0.5, 1} {
+		if _, err := New(store, testClientID, testClientSecret, share, nil, discard); err != nil {
+			t.Errorf("New with Quota share %v: %v", share, err)
+		}
 	}
 }

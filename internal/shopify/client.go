@@ -53,6 +53,7 @@ type Client struct {
 	logger       *slog.Logger
 	clock        clock
 	bucket       bucket // the Store's query cost bucket, as far as the client knows it
+	quotas       quotas // each Caller's Quota of the Store's bucket
 
 	mu     sync.Mutex // held while a token is fetched, so only one runs at a time
 	token  string
@@ -60,8 +61,14 @@ type Client struct {
 }
 
 // New returns a Client for the Store at baseURL ("https://<name>.myshopify.com").
-// If hc is nil, http.DefaultClient is used. Warnings go to logger.
-func New(baseURL, clientID, clientSecret string, hc *http.Client, logger *slog.Logger) *Client {
+// quotaShare is the share of the Store's rate limit each Caller's Quota
+// gets; it must be above 0 and at most 1. If hc is nil,
+// http.DefaultClient is used. Warnings go to logger.
+func New(baseURL, clientID, clientSecret string, quotaShare float64, hc *http.Client, logger *slog.Logger) (*Client, error) {
+	// Written this way round, NaN is refused too.
+	if !(quotaShare > 0 && quotaShare <= 1) {
+		return nil, fmt.Errorf("the Quota share must be above 0 and at most 1, got %v", quotaShare)
+	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}
@@ -72,7 +79,8 @@ func New(baseURL, clientID, clientSecret string, hc *http.Client, logger *slog.L
 		hc:           hc,
 		logger:       logger,
 		clock:        realClock{},
-	}
+		quotas:       quotas{share: quotaShare},
+	}, nil
 }
 
 // ThrottleStatus is the state of the Store's query cost bucket.
