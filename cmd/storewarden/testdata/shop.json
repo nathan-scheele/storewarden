@@ -1,0 +1,23 @@
+{
+  "data": {
+    "shop": {
+      "name": "storewarden-dev",
+      "myshopifyDomain": "storewarden-dev.myshopify.com",
+      "currencyCode": "USD",
+      "plan": {
+        "publicDisplayName": "Plus"
+      }
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 2,
+      "actualQueryCost": 2,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19998,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}
