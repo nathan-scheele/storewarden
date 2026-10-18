@@ -58,7 +58,8 @@ func readTool[In, Out any](def *mcp.Tool, handler func(*shopify.Client) mcp.Tool
 	}}
 }
 
-// writeTool makes a Write tool, like readTool.
+// writeTool makes a Write tool, like readTool. Its input must embed
+// WriteOptions, which the Audit records show.
 func writeTool[In, Out any](def *mcp.Tool, handler func(*shopify.Client) mcp.ToolHandlerFor[In, Out]) tool {
 	def.Annotations = destructive
 	return tool{def: def, write: true, add: func(s *mcp.Server, client *shopify.Client) {
@@ -78,6 +79,16 @@ func Register(s *mcp.Server, client *shopify.Client, writeMode bool) map[string]
 		}
 	}
 	return served
+}
+
+// isWriteTool reports whether name is one of the Write tools.
+func isWriteTool(name string) bool {
+	for _, t := range all {
+		if t.def.Name == name {
+			return t.write
+		}
+	}
+	return false
 }
 
 // getShopMaxCost is the most getShopQuery can cost, in Shopify's query cost

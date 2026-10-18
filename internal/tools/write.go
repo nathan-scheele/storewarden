@@ -78,21 +78,28 @@ type SetInventoryQuantityInput struct {
 	InventoryItemID string `json:"inventory_item_id" jsonschema:"the inventory item's ID, such as gid://shopify/InventoryItem/123, from get_product"`
 	LocationID      string `json:"location_id" jsonschema:"the location's ID, such as gid://shopify/Location/123, from get_inventory"`
 	Quantity        int    `json:"quantity" jsonschema:"the new available quantity, 0 or more"`
-	// A pointer, so that a missing dry_run can mean true.
-	DryRun         *bool  `json:"dry_run,omitempty" jsonschema:"true (the default) only reports the change; false makes it"`
-	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"required when dry_run is false: up to 255 characters, new for each change and the same when retrying it; a UUID is a good choice"`
+	// Embedded, so dry_run and idempotency_key are inputs of this Tool too.
+	WriteOptions
 	// A pointer, so that 0 differs from missing.
 	ExpectedQuantity *int `json:"expected_quantity,omitempty" jsonschema:"required when dry_run is false: the available quantity you believe is current, from a dry run"`
 }
 
+// WriteOptions are the inputs every Write tool takes. Every Write tool's
+// input embeds them, and the Audit records show them.
+type WriteOptions struct {
+	// A pointer, so that a missing dry_run can mean true.
+	DryRun         *bool  `json:"dry_run,omitempty" jsonschema:"true (the default) only reports the change; false makes it"`
+	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"required when dry_run is false: up to 255 characters, new for each change and the same when retrying it; a UUID is a good choice"`
+}
+
+// isDryRun reports whether the call is a Dry run: every call is, unless the
+// Caller says false.
+func (o WriteOptions) isDryRun() bool {
+	return o.DryRun == nil || *o.DryRun
+}
+
 // maxIdempotencyKeyLength is the longest Idempotency key a Caller may give.
 const maxIdempotencyKeyLength = 255
-
-// isDryRun reports whether a call with this dry_run argument is a Dry run:
-// every call is, unless the Caller says false.
-func isDryRun(dryRun *bool) bool {
-	return dryRun == nil || *dryRun
-}
 
 // checkRealWrite returns an error unless in has what a real write needs.
 func checkRealWrite(in SetInventoryQuantityInput) error {
@@ -128,7 +135,7 @@ func setInventoryQuantity(client *shopify.Client) mcp.ToolHandlerFor[SetInventor
 		if in.Quantity < 0 {
 			return nil, InventoryChange{}, fmt.Errorf("quantity must be 0 or more, not %d", in.Quantity)
 		}
-		if !isDryRun(in.DryRun) {
+		if !in.isDryRun() {
 			if err := checkRealWrite(in); err != nil {
 				return nil, InventoryChange{}, err
 			}

@@ -48,7 +48,7 @@ func Audited(log *audit.Log) mcp.Middleware {
 				// DryRun and IdempotencyKey stay empty for Read tools,
 				// which have neither.
 			}
-			if params.Name == setInventoryQuantityName {
+			if isWriteTool(params.Name) {
 				rec.DryRun, rec.IdempotencyKey = writeArgs(params.Arguments)
 			}
 			if err := log.Write(rec); err != nil {
@@ -78,14 +78,11 @@ func Audited(log *audit.Log) mcp.Middleware {
 // arguments haven't been validated yet; if they can't be read, the call is
 // taken as a Dry run, which is what the Tool will treat it as or refuse.
 func writeArgs(args json.RawMessage) (dryRun bool, idempotencyKey string) {
-	var in struct {
-		DryRun         *bool  `json:"dry_run"`
-		IdempotencyKey string `json:"idempotency_key"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	var opts WriteOptions
+	if err := json.Unmarshal(args, &opts); err != nil {
 		return true, ""
 	}
-	return isDryRun(in.DryRun), in.IdempotencyKey
+	return opts.isDryRun(), opts.IdempotencyKey
 }
 
 // outcome describes how a call ended, for the result record.
