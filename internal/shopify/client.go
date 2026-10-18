@@ -21,6 +21,22 @@ const APIVersion = "2026-10"
 // maxResponseBytes caps how much of a Shopify response is read.
 const maxResponseBytes = 10 << 20
 
+// renewBefore is how long before its expiry an access token is replaced.
+const renewBefore = 5 * time.Minute
+
+// clock is the client's source of time. Tests replace it so they never
+// really sleep.
+type clock interface {
+	Now() time.Time
+	After(d time.Duration) <-chan time.Time // like time.After
+}
+
+// realClock is the clock from package time.
+type realClock struct{}
+
+func (realClock) Now() time.Time                         { return time.Now() }
+func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
 // Client runs GraphQL queries against one Store. It gets its own access
 // token with the client credentials grant and keeps it only in memory.
 // Credentials and tokens never appear in its errors.
@@ -29,6 +45,7 @@ type Client struct {
 	clientID     string
 	clientSecret string
 	hc           *http.Client
+	clock        clock
 
 	mu     sync.Mutex // held while a token is fetched, so only one runs at a time
 	token  string
@@ -46,6 +63,7 @@ func New(baseURL, clientID, clientSecret string, hc *http.Client) *Client {
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		hc:           hc,
+		clock:        realClock{},
 	}
 }
 
@@ -71,25 +89,13 @@ type Response struct {
 
 // Query runs a GraphQL query and decodes its data into data.
 func (c *Client) Query(ctx context.Context, query string, variables map[string]any, data any) (*Response, error) {
-	token, err := c.accessToken(ctx)
-	if err != nil {
-		return nil, err
-	}
 	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/admin/api/"+APIVersion+"/graphql.json", bytes.NewReader(body))
+	resp, err := c.post(ctx, body)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Shopify-Access-Token", token)
-
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("shopify: graphql: %w", err)
 	}
 	defer resp.Body.Close()
 	meta := &Response{RequestID: resp.Header.Get("X-Request-Id")}
@@ -123,12 +129,51 @@ func (c *Client) Query(ctx context.Context, query string, variables map[string]a
 	return meta, nil
 }
 
+// post sends a GraphQL request body with the access token. If Shopify
+// refuses the token (HTTP 401), it gets a new token and sends the body once
+// more. The caller closes the response body.
+func (c *Client) post(ctx context.Context, body []byte) (*http.Response, error) {
+	token, err := c.accessToken(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.send(ctx, token, body)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+	resp.Body.Close()
+	token, err = c.accessToken(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	return c.send(ctx, token, body)
+}
+
+// send makes one GraphQL request.
+func (c *Client) send(ctx context.Context, token string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/admin/api/"+APIVersion+"/graphql.json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Shopify-Access-Token", token)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("shopify: graphql: %w", err)
+	}
+	return resp, nil
+}
+
 // accessToken returns the cached token, fetching a new one with the client
-// credentials grant once it has expired.
-func (c *Client) accessToken(ctx context.Context) (string, error) {
+// credentials grant once it is within renewBefore of its expiry. refused is
+// a token Shopify has just refused, or "": if it is still the cached token,
+// it is replaced. Callers that were refused the same token at the same time
+// therefore cause only one new token between them.
+func (c *Client) accessToken(ctx context.Context, refused string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.token != "" && time.Now().Before(c.expiry) {
+	if c.token != "" && c.token != refused && c.clock.Now().Before(c.expiry.Add(-renewBefore)) {
 		return c.token, nil
 	}
 
@@ -164,6 +209,6 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 		return "", errors.New("shopify: access token: response has no token")
 	}
 	c.token = out.AccessToken
-	c.expiry = time.Now().Add(time.Duration(out.ExpiresIn) * time.Second)
+	c.expiry = c.clock.Now().Add(time.Duration(out.ExpiresIn) * time.Second)
 	return c.token, nil
 }

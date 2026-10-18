@@ -1,0 +1,282 @@
+package shopify
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+)
+
+const (
+	testClientID     = "test-client-id"
+	testClientSecret = "test-client-secret"
+)
+
+// fakeClock is a clock that only moves when told to. After moves it forward
+// by the full wait at once, so a test never really sleeps.
+type fakeClock struct {
+	mu    sync.Mutex
+	now   time.Time
+	waits []time.Duration
+}
+
+func newFakeClock() *fakeClock {
+	// Start at the real time so context deadlines, which use the real clock,
+	// line up with the fake one.
+	return &fakeClock{now: time.Now()}
+}
+
+func (f *fakeClock) Now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.now
+}
+
+func (f *fakeClock) After(d time.Duration) <-chan time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.now = f.now.Add(d)
+	f.waits = append(f.waits, d)
+	ch := make(chan time.Time, 1)
+	ch <- f.now
+	return ch
+}
+
+func (f *fakeClock) Advance(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.now = f.now.Add(d)
+}
+
+// Waits returns every wait the client asked for.
+func (f *fakeClock) Waits() []time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Duration(nil), f.waits...)
+}
+
+// fakeShopify is an httptest Shopify. It issues numbered tokens
+// ("token-1", "token-2", ...) that last 24 hours, and answers GraphQL
+// requests with graphql, which sees the token each request carried.
+type fakeShopify struct {
+	*httptest.Server
+
+	mu      sync.Mutex
+	issued  int
+	tokens  []string // token sent with each GraphQL request, in order
+	graphql func(w http.ResponseWriter, token string, call int)
+}
+
+func newFakeShopify(t *testing.T, graphql func(w http.ResponseWriter, token string, call int)) *fakeShopify {
+	t.Helper()
+	f := &fakeShopify{graphql: graphql}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /admin/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
+		if r.FormValue("grant_type") != "client_credentials" ||
+			r.FormValue("client_id") != testClientID || r.FormValue("client_secret") != testClientSecret {
+			http.Error(w, "bad credentials", http.StatusUnauthorized)
+			return
+		}
+		f.mu.Lock()
+		f.issued++
+		token := fmt.Sprintf("token-%d", f.issued)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"access_token": token, "expires_in": 86399})
+	})
+	mux.HandleFunc("POST /admin/api/"+APIVersion+"/graphql.json", func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("X-Shopify-Access-Token")
+		f.mu.Lock()
+		f.tokens = append(f.tokens, token)
+		call := len(f.tokens)
+		graphql := f.graphql
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Request-Id", fmt.Sprintf("request-%d", call))
+		graphql(w, token, call)
+	})
+	f.Server = httptest.NewServer(mux)
+	t.Cleanup(f.Close)
+	return f
+}
+
+// Issued returns how many tokens Shopify has issued.
+func (f *fakeShopify) Issued() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.issued
+}
+
+// Tokens returns the token each GraphQL request carried.
+func (f *fakeShopify) Tokens() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.tokens...)
+}
+
+// shopBody is a successful response with a full cost bucket.
+const shopBody = `{
+  "data": {"shop": {"name": "storewarden-dev"}},
+  "extensions": {"cost": {"requestedQueryCost": 2, "actualQueryCost": 2,
+    "throttleStatus": {"maximumAvailable": 2000.0, "currentlyAvailable": 1998, "restoreRate": 100.0}}}
+}`
+
+func answer(body string) func(http.ResponseWriter, string, int) {
+	return func(w http.ResponseWriter, _ string, _ int) { fmt.Fprint(w, body) }
+}
+
+func newTestClient(f *fakeShopify, clock *fakeClock) *Client {
+	c := New(f.URL, testClientID, testClientSecret, nil)
+	c.clock = clock
+	return c
+}
+
+type shopData struct {
+	Shop struct {
+		Name string `json:"name"`
+	} `json:"shop"`
+}
+
+func query(t *testing.T, c *Client) (*Response, error) {
+	t.Helper()
+	var data shopData
+	return c.Query(t.Context(), "query { shop { name } }", nil, &data)
+}
+
+func mustQuery(t *testing.T, c *Client) *Response {
+	t.Helper()
+	resp, err := query(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestTokenIsIssuedOnceAndReused(t *testing.T) {
+	f := newFakeShopify(t, answer(shopBody))
+	c := newTestClient(f, newFakeClock())
+
+	mustQuery(t, c)
+	mustQuery(t, c)
+
+	if got := f.Issued(); got != 1 {
+		t.Errorf("tokens issued = %d, want 1", got)
+	}
+	if got := f.Tokens(); len(got) != 2 || got[0] != "token-1" || got[1] != "token-1" {
+		t.Errorf("tokens sent = %v, want [token-1 token-1]", got)
+	}
+}
+
+func TestTokenIsReissuedFiveMinutesBeforeExpiry(t *testing.T) {
+	f := newFakeShopify(t, answer(shopBody))
+	clock := newFakeClock()
+	c := newTestClient(f, clock)
+
+	mustQuery(t, c)
+	// The token lasts 86399s; 5m01s before then it is still used.
+	clock.Advance(86399*time.Second - 5*time.Minute - time.Second)
+	mustQuery(t, c)
+	// Within five minutes of expiry it is replaced.
+	clock.Advance(2 * time.Second)
+	mustQuery(t, c)
+
+	want := []string{"token-1", "token-1", "token-2"}
+	if got := f.Tokens(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+// refusing answers 401 to any request carrying one of the refused tokens.
+func refusing(refused ...string) func(http.ResponseWriter, string, int) {
+	return func(w http.ResponseWriter, token string, _ int) {
+		for _, r := range refused {
+			if token == r {
+				http.Error(w, `{"errors":"[API] Invalid API key or access token"}`, http.StatusUnauthorized)
+				return
+			}
+		}
+		fmt.Fprint(w, shopBody)
+	}
+}
+
+func TestTokenIsReissuedOnceAfter401AndTheRequestRetried(t *testing.T) {
+	f := newFakeShopify(t, refusing("token-1"))
+	c := newTestClient(f, newFakeClock())
+
+	var data shopData
+	if _, err := c.Query(t.Context(), "query { shop { name } }", nil, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Shop.Name != "storewarden-dev" {
+		t.Errorf("shop name = %q, want storewarden-dev", data.Shop.Name)
+	}
+	want := []string{"token-1", "token-2"}
+	if got := f.Tokens(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+func TestA401AfterReissueIsAnError(t *testing.T) {
+	f := newFakeShopify(t, refusing("token-1", "token-2", "token-3"))
+	c := newTestClient(f, newFakeClock())
+
+	if _, err := query(t, c); err == nil {
+		t.Fatal("query succeeded, want an error")
+	}
+	if got := f.Issued(); got != 2 {
+		t.Errorf("tokens issued = %d, want 2 (the first and one reissue)", got)
+	}
+	if got := len(f.Tokens()); got != 2 {
+		t.Errorf("GraphQL requests = %d, want 2 (the first and one retry)", got)
+	}
+}
+
+// concurrently runs n queries at once and fails the test if any fails.
+func concurrently(t *testing.T, c *Client, n int) {
+	t.Helper()
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for range n {
+		wg.Go(func() {
+			var data shopData
+			_, err := c.Query(t.Context(), "query { shop { name } }", nil, &data)
+			errs <- err
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestConcurrentCallersShareOneTokenRequest(t *testing.T) {
+	f := newFakeShopify(t, answer(shopBody))
+	c := newTestClient(f, newFakeClock())
+
+	concurrently(t, c, 20)
+
+	if got := f.Issued(); got != 1 {
+		t.Errorf("tokens issued = %d, want 1", got)
+	}
+}
+
+func TestConcurrentCallersRefusedTogetherShareOneReissue(t *testing.T) {
+	f := newFakeShopify(t, answer(shopBody))
+	c := newTestClient(f, newFakeClock())
+	mustQuery(t, c) // token-1 is now cached
+	f.mu.Lock()
+	f.graphql = refusing("token-1")
+	f.mu.Unlock()
+
+	concurrently(t, c, 20)
+
+	if got := f.Issued(); got != 2 {
+		t.Errorf("tokens issued = %d, want 2 (the first and one reissue)", got)
+	}
+}
