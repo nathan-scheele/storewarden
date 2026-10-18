@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# denylist fails if its stdin contains a term from .public-denylist.
+#
+# .public-denylist is gitignored and local: one term per line, matched
+# case-insensitively; blank lines and lines starting with # are skipped.
+# It lists words that must never reach this public repo, such as private
+# names. It can't live in the repo, which would publish the terms it guards.
+set -euo pipefail
+
+list="$(git rev-parse --show-toplevel)/.public-denylist"
+[[ -f "$list" ]] || exit 0
+terms=$(grep -v -e '^[[:space:]]*$' -e '^#' "$list" || true)
+[[ -n "$terms" ]] || exit 0
+if grep -i -n -F -e "$terms"; then
+  echo "${1:-input} contains a term from .public-denylist (lines above)." >&2
+  exit 1
+fi

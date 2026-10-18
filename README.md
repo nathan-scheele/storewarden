@@ -515,12 +515,12 @@ It doesn't capture a live throttled response from Shopify.
 ## Development
 
 ```sh
-make check   # gofmt, go vet, the never-public guard, and go test -race
-make ci      # check, plus staticcheck and govulncheck at pinned versions
-make hooks   # run make check before every commit
+make check   # gofmt, go vet, the never-public guard, staticcheck and go test -race
+make ci      # check, plus govulncheck on go.mod's Go version
+make hooks   # run make check before every commit, and the denylist check
 ```
 
-The Makefile adds `-tags ts_omit_peerapiserver` wherever it's needed. CI (`.github/workflows/ci.yml`) runs the same targets on every push and pull request. It never touches a real tailnet or Shopify, and it has no secrets.
+The Makefile adds `-tags ts_omit_peerapiserver` wherever it's needed. If a gitignored `.public-denylist` file exists (one term per line), the hooks refuse a commit whose changes or message contain one of its terms. CI (`.github/workflows/ci.yml`) runs the same targets on every push and pull request. It never touches a real tailnet or Shopify, and it has no secrets.
 
 The tests drive the whole server, with fakes for WhoIs, Shopify and the audit sink. The fake Shopify replays responses recorded from the development store with `scripts/record-fixture.sh`.
 

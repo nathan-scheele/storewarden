@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
-# Runs CI's offline checks (make check) before every commit. `make ci` adds
-# staticcheck and govulncheck. Install with `make hooks`.
-exec make check
+# Runs make check before every commit, then checks the lines being added
+# against .public-denylist (see .githooks/denylist). `make ci` adds
+# govulncheck. Install with `make hooks`.
+set -euo pipefail
+make check
+git diff --cached -U0 --no-color | { grep '^+[^+]' || true; } | "$(dirname "$0")/denylist" "the staged changes"

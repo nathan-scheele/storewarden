@@ -213,6 +213,7 @@ finish() {
 # run, a real write, a retry and a stale write, puts it back, and checks
 # the Audit records.
 
+ISSUE=9          # the smoke-test issue the results are posted to
 CAP="github.com/nathan-scheele/storewarden"
 ADMIN="https://login.tailscale.com/admin"
 RESULTS=()       # "PASS  check" or "FAIL  check"
@@ -537,13 +538,17 @@ run_wizard() {
 TOTAL_STAGES=21
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# A worktree has no .env of its own, so use the main checkout's.
+if [[ ! -f "$ENV_FILE" ]]; then
+  ENV_FILE="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.env"
+fi
 trap cleanup EXIT
 case "$(uname)" in
   Darwin) STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/storewarden}" ;;
   *)      STATE_DIR="${STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/storewarden}" ;;
 esac
 
-banner "storewarden smoke test (#9): the tailnet, every Tool and the Write tool"
+banner "storewarden smoke test (#$ISSUE): the tailnet, every Tool and the Write tool"
 
 # ── 1 ─────────────────────────────────────────────────────────────────────
 stage "Preflight"
@@ -914,15 +919,15 @@ say "$passed passed, $failed failed."
 note "Logs: $LOG"
 printf '\n'
 # The comment names no tailnet, node or address: the repo is public.
-if confirm "Post this table as a comment on issue #9?"; then
+if confirm "Post this table as a comment on issue #$ISSUE?"; then
   local body
   body="Manual smoke test with \`scripts/smoke-tailnet.sh\` at $(git rev-parse --short HEAD), against the development store: $passed passed, $failed failed."$'\n\n'
   body+="| Result | Check |"$'\n'"|---|---|"$'\n'"$table"$'\n'
   body+="The calls were made by \`cmd/storewarden-smoke\`, two separate ephemeral tailnet nodes, with the official MCP SDK client. The inventory history was checked by hand in the Shopify admin. Not covered: capturing a live throttled response."
-  if gh issue comment 9 -R nathan-scheele/storewarden --body "$body" >/dev/null; then
-    printf '  %s✓ posted%s to issue #9\n' "$GREEN" "$RESET"
+  if gh issue comment "$ISSUE" -R nathan-scheele/storewarden --body "$body" >/dev/null; then
+    printf '  %s✓ posted%s to issue #%s\n' "$GREEN" "$RESET" "$ISSUE"
   else
-    SKIPPED+=("posting the results to issue #9")
+    SKIPPED+=("posting the results to issue #$ISSUE")
   fi
 fi
 

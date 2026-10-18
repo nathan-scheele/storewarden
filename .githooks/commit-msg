@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Checks the commit message against .public-denylist (see .githooks/denylist).
+set -euo pipefail
+"$(dirname "$0")/denylist" "the commit message" < "$1"

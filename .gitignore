@@ -1,3 +1,4 @@
 .env
 bin/
 .claude/settings.local.json
+.public-denylist

@@ -18,9 +18,14 @@ vars="$dir/$name.variables.json"
 out="$dir/$name.json"
 [[ -f "$query" ]] || { echo "no query at $query" >&2; exit 1; }
 
+# A worktree has no .env of its own, so use the main checkout's.
+env_file=.env
+if [[ ! -f "$env_file" ]]; then
+  env_file="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.env"
+fi
 set -a
-# shellcheck disable=SC1091
-. ./.env
+# shellcheck disable=SC1090
+. "$env_file"
 set +a
 : "${SHOPIFY_STORE:?SHOPIFY_STORE missing from .env}"
 : "${SHOPIFY_CLIENT_ID:?SHOPIFY_CLIENT_ID missing from .env}"

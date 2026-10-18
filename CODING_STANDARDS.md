@@ -13,3 +13,7 @@ Errors, logs and Audit records say what happened. They carry no credentials, no 
 ## Never public
 
 storewarden is reachable only over the tailnet (`docs/design.md`, Listening; ADR 0003). Review every new socket, listener, tsnet option or dependency feature against that, including what the dependency does underneath (`docs/agents/dependency-notes.md`). Whatever depends on the Caller stays private to that Caller: per-Caller results are marked `cacheScope: "private"`, and no per-Caller state carries over between requests (ADR 0001).
+
+## Reachable by a Caller
+
+A behaviour a Caller should see (an error, a limit, a retry hint) has at least one handler-seam test that shows it reaching the Caller through the assembled server. A test at a lower seam, such as the Shopify client with an injected clock or deadline, proves the mechanism works; only the handler seam proves the server ever lets it happen.
