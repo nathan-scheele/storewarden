@@ -5,7 +5,7 @@ package main
 // one inventory item through a Dry run, a real write, a retry with the same
 // Idempotency key and a write with a stale Expected quantity, and finally
 // puts the quantity back. "read-only" runs as a Caller granted only the Read
-// tools, and checks that the Write tool is hidden and denied.
+// tools, and checks that both Write tools are hidden and denied.
 
 import (
 	"context"
@@ -115,20 +115,8 @@ func (s session) toolNames(ctx context.Context) ([]string, error) {
 
 // available returns the available quantity of item at location.
 func (s session) available(ctx context.Context, item, location string) (int, error) {
-	var inv tools.Inventory
-	toolErr, err := s.call(ctx, "get_inventory", tools.GetInventoryInput{InventoryItemID: item}, &inv)
-	if err != nil {
-		return 0, err
-	}
-	if toolErr != "" {
-		return 0, fmt.Errorf("get_inventory: %s", toolErr)
-	}
-	for _, level := range inv.Levels {
-		if level.LocationID == location {
-			return level.Available, nil
-		}
-	}
-	return 0, fmt.Errorf("get_inventory shows no level at %s", location)
+	level, err := s.level(ctx, item, location)
+	return level.Available, err
 }
 
 // runTools is the "tools" command.
@@ -140,8 +128,8 @@ func runTools(ctx context.Context, s session) scenario {
 		sc.Error = "tools/list: " + err.Error()
 		return sc
 	}
-	sc.record("tools/list shows all five Tools to the fully granted Caller",
-		len(names) == 5 && slices.Contains(names, writeTool), strings.Join(names, ", "))
+	sc.record("tools/list shows all six Tools to the fully granted Caller",
+		len(names) == 6 && slices.Contains(names, writeTool) && slices.Contains(names, moveTool), strings.Join(names, ", "))
 
 	var shop tools.Shop
 	if toolErr, err := s.call(ctx, "get_shop", nil, &shop); sc.failed("get_shop", toolErr, err) {
@@ -276,7 +264,7 @@ func runReadOnly(ctx context.Context, s session) scenario {
 		return sc
 	}
 	sc.record("the read-only Caller's tools/list has the four Read tools and no Write tool",
-		len(names) == 4 && !slices.Contains(names, writeTool), strings.Join(names, ", "))
+		len(names) == 4 && !slices.Contains(names, writeTool) && !slices.Contains(names, moveTool), strings.Join(names, ", "))
 
 	var shop tools.Shop
 	const read = "the read-only Caller can use a Read tool"
@@ -293,6 +281,17 @@ func runReadOnly(ctx context.Context, s session) scenario {
 	toolErr, err := s.call(ctx, writeTool, in, &out)
 	want := fmt.Sprintf("unknown tool %q", writeTool)
 	sc.record("the read-only Caller calling the Write tool gets "+want,
+		err != nil && strings.Contains(err.Error(), want),
+		fmt.Sprintf("error %q, Tool error %q", errText(err), toolErr))
+
+	move := tools.MoveInventoryQuantityInput{
+		InventoryItemID: in.InventoryItemID, LocationID: in.LocationID,
+		From: "available", To: "damaged", Quantity: 1,
+	}
+	var moved tools.InventoryMove
+	toolErr, err = s.call(ctx, moveTool, move, &moved)
+	want = fmt.Sprintf("unknown tool %q", moveTool)
+	sc.record("the read-only Caller calling the move Tool gets "+want,
 		err != nil && strings.Contains(err.Error(), want),
 		fmt.Sprintf("error %q, Tool error %q", errText(err), toolErr))
 	return sc

@@ -1,6 +1,6 @@
 # storewarden
 
-storewarden is an MCP server for one Shopify store. It joins your tailnet as its own node and offers a small, fixed set of Tools: four that read the store, and one that corrects an inventory count. Grants in your tailnet policy file decide which Tools each device or user may call. Anything not granted is hidden and refused.
+storewarden is an MCP server for one Shopify store. It joins your tailnet as its own node and offers a small, fixed set of Tools: four that read the store, one that corrects an inventory count, and one that moves units between Inventory states, such as from available to damaged. Grants in your tailnet policy file decide which Tools each device or user may call. Anything not granted is hidden and refused.
 
 storewarden is an independent project. It is not made or supported by Tailscale or Shopify.
 
@@ -8,7 +8,7 @@ What it does:
 
 - **Identity from the tailnet.** Every request is identified with Tailscale WhoIs. Callers need no Shopify credentials of their own.
 - **Access from the policy file.** You grant Tools by exact name, in the same file as the rest of your tailnet access rules.
-- **Guarded writes.** The one Write tool doesn't exist unless the operator turns on Write mode. Every call is a Dry run unless the Caller opts out. A real write needs an Idempotency key and an Expected quantity, and Shopify enforces both.
+- **Guarded writes.** The two Write tools don't exist unless the operator turns on Write mode. Every call is a Dry run unless the Caller opts out. A real write needs an Idempotency key and an Expected quantity for each Inventory state it changes, and Shopify enforces both.
 - **An Audit record for every attempted call.** A call that can't be audited doesn't happen.
 - **Shopify's rate limit is respected.** storewarden learns the store's limits from Shopify's responses and waits for capacity.
 - **Tailnet only.** It has no public listener.
@@ -93,7 +93,7 @@ Flags (from `storewarden -h`):
 | `--hostname` | `storewarden` | The tailnet node's name. |
 | `--state-dir` | `storewarden` in your user config directory | Where tsnet keeps the node's state. On macOS that is `~/Library/Application Support/storewarden`; on Linux, `~/.config/storewarden`. |
 | `--tags` | `tag:storewarden` | Comma-separated tags the node advertises. |
-| `--allow-writes` | `false` | Write mode: serve the Write tool to Callers granted it. |
+| `--allow-writes` | `false` | Write mode: serve the Write tools to Callers granted them. |
 | `--quota-share` | `0.5` | Each Caller's Quota, as a share of the Store's rate limit: above 0 and at most 1. storewarden refuses to start with any other value. See [Rate limits](#rate-limits). |
 | `--audit-log` | `-` | A file to append Audit records to, or `-` for stdout. |
 | `--debug` | `false` | Log at debug level, including tsnet's backend logs. |
@@ -148,7 +148,7 @@ Any MCP client that supports Streamable HTTP works the same way.
 This is a complete policy file. It has two Grants:
 
 - devices tagged `tag:agent` may use the four Read tools;
-- members of `group:inventory` may read inventory and use the Write tool.
+- members of `group:inventory` may read inventory, correct it, and move units between Inventory states.
 
 ```hujson
 {
@@ -176,7 +176,7 @@ This is a complete policy file. It has two Grants:
       "ip":  ["tcp:80"],
       "app": {
         "github.com/nathan-scheele/storewarden": [
-          {"tools": ["get_inventory", "set_inventory_quantity"]},
+          {"tools": ["get_inventory", "set_inventory_quantity", "move_inventory_quantity"]},
         ],
       },
     },
@@ -194,11 +194,12 @@ Each Grant has two parts, and a Caller needs both:
 How storewarden reads the Grants:
 
 - **Exact names.** Tool names must match exactly. There are no wildcards and no groups of Tools.
-- **Union.** When several Grants match a Caller, the Caller gets every Tool any of them names. A Grant can only add Tools, never take them away. For example, if you add a third Grant that gives `group:inventory` the Read tools, Alice's devices can use all five Tools.
+- **Union.** When several Grants match a Caller, the Caller gets every Tool any of them names. A Grant can only add Tools, never take them away. For example, if you add a third Grant that gives `group:inventory` the Read tools, Alice's devices can use all six Tools.
 - **No capability, no access.** A device with network access but no storewarden capability gets HTTP 403 before any MCP exchange.
 - **Typos deny.** A Grant value with an unknown field, such as `"tool"` instead of `"tools"`, denies the Caller and logs an error. A typo can't silently grant nothing.
-- **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. `set_inventory_quantity` is a Tool storewarden has even while Write mode is off, so naming it never warns. The rest of the Grant still applies.
-- **Write mode wins.** `set_inventory_quantity` is allowed only when storewarden runs with `--allow-writes`. A Grant that names it is still valid while Write mode is off; it just allows nothing until Write mode is on, and it logs no warning.
+- **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. The Write tools, `set_inventory_quantity` and `move_inventory_quantity`, are Tools storewarden has even while Write mode is off, so naming them never warns. The rest of the Grant still applies.
+- **Write mode wins.** The Write tools are allowed only when storewarden runs with `--allow-writes`. A Grant that names one is still valid while Write mode is off; it just allows nothing until Write mode is on, and it logs no warning.
+- **Each Write tool by name.** A Grant for `set_inventory_quantity` doesn't cover `move_inventory_quantity`, or the other way round. You can let an agent record damaged stock without letting it set counts.
 
 Tagged devices are full Callers. They are the usual way to run headless Callers, such as agents on servers. A tagged device has no user, so `group:inventory` matches only the untagged devices of its members.
 
@@ -215,8 +216,9 @@ Every Tool runs one fixed GraphQL document against Shopify's Admin API, version 
 | `get_product` | Read | `read_products` |
 | `get_inventory` | Read | `read_inventory`, `read_locations` |
 | `set_inventory_quantity` | Write (only in Write mode) | `write_inventory`; its Dry run reads with `read_inventory` |
+| `move_inventory_quantity` | Write (only in Write mode) | `write_inventory`; its Dry run reads with `read_inventory` |
 
-Read tools are annotated read-only and idempotent. The Write tool is annotated destructive and idempotent.
+Read tools are annotated read-only and idempotent. Write tools are annotated destructive and idempotent.
 
 `tools/list` shows only the Tools the Caller is granted. A call to a Tool the Caller isn't granted fails with the same error as a Tool that doesn't exist: `unknown tool "name"`.
 
@@ -341,6 +343,79 @@ On the development store (Admin API 2026-10), retries behaved like this ([docs/d
 
 So if you retry a change that may already have gone through, expect either the original result or the stale-quantity error. After a stale-quantity error, run a Dry run: it shows whether the change was made.
 
+### move_inventory_quantity
+
+Moves units of an inventory item at one location between `available` and one of `damaged`, `quality_control` or `safety_stock`, so that Shopify records what happened to them instead of just a lower count. Like `set_inventory_quantity`, it exists only when storewarden runs with `--allow-writes`, and a Caller also needs a Grant that names it.
+
+Input:
+
+| Field | Meaning |
+|---|---|
+| `inventory_item_id` | The item, from `get_product`. |
+| `location_id` | The location, from `get_inventory`. Both states are at this location. |
+| `from` | The Inventory state to move units out of: `available`, `damaged`, `quality_control` or `safety_stock`. |
+| `to` | The Inventory state to move them into, from the same list. Exactly one of `from` and `to` must be `available`. |
+| `quantity` | How many units to move, 1 or more. |
+| `dry_run` | Optional. `true` (the default) reports the move without making it. `false` makes it. |
+| `idempotency_key` | Required when `dry_run` is `false`. As for `set_inventory_quantity`. |
+| `expected_from_quantity` | Required when `dry_run` is `false`. The quantity you believe is current in `from`, from a Dry run. `quantity` can't be more than this. |
+| `expected_to_quantity` | Required when `dry_run` is `false`. The quantity you believe is current in `to`, from a Dry run. |
+
+A move between two non-available states, from a state to itself, or naming `reserved`, `committed`, `incoming` or `on_hand`, is refused before Shopify is called. Reserved and committed stock is held for orders, so it is out of reach.
+
+Output:
+
+| Field | Meaning |
+|---|---|
+| `dry_run` | Whether this was a Dry run. |
+| `from` | `current` and `new`: the `from` state's quantity before and after the move. |
+| `to` | `current` and `new`: the `to` state's quantity before and after the move. |
+| `applied` | Whether the Store was changed. |
+| `request_id` | This call's ID in the Audit records. |
+
+For example, a stock check finds 3 damaged units:
+
+1. **Dry run.**
+
+   ```json
+   {"inventory_item_id": "gid://shopify/InventoryItem/123", "location_id": "gid://shopify/Location/456", "from": "available", "to": "damaged", "quantity": 3}
+   ```
+
+   ```json
+   {"dry_run": true, "from": {"current": 50, "new": 47}, "to": {"current": 0, "new": 3}, "applied": false, "request_id": "MJ2TJ7Q4XWFNEN6QLNEJ5YRGKY"}
+   ```
+
+2. **Execute**, with a new Idempotency key and both of the Dry run's `current` quantities:
+
+   ```json
+   {"inventory_item_id": "gid://shopify/InventoryItem/123", "location_id": "gid://shopify/Location/456", "from": "available", "to": "damaged", "quantity": 3,
+    "dry_run": false, "idempotency_key": "60161b67-10f6-43bb-a353-111d474067ec", "expected_from_quantity": 50, "expected_to_quantity": 0}
+   ```
+
+   ```json
+   {"dry_run": false, "from": {"current": 50, "new": 47}, "to": {"current": 0, "new": 3}, "applied": true, "request_id": "S3ZQ6WDUHJ4OAXG2TQ5PVY7L4E"}
+   ```
+
+To return them to sale later, move them back with `from` `damaged` and `to` `available`.
+
+A real move calls Shopify's `inventoryMoveQuantities` with:
+
+- `changeFromQuantity` set on both sides, to `expected_from_quantity` and `expected_to_quantity`, so Shopify's compare-and-swap check always runs for both states;
+- Shopify's `@idempotent` directive with the Caller's `idempotency_key`;
+- the non-available state's name as the reason (`damaged`, `quality_control` or `safety_stock`), so Shopify's inventory history says what happened;
+- a reference document URI of `storewarden://audit/<request_id>`, which is also the ledger document URI on the non-available side. Shopify refuses a ledger document URI on `available`.
+
+storewarden refuses a `quantity` above `expected_from_quantity` itself, because Shopify doesn't: on the development store, a move of 4 damaged units when 3 were there, with both compare-and-swap values right, was applied and left damaged at -1.
+
+Shopify's refusals come back as plain Tool errors:
+
+- **Stale quantity** (`CHANGE_FROM_QUANTITY_STALE`): a quantity changed since you read it. Nothing changed. Run a new Dry run and move with its `current` quantities, with a new key.
+- **Key reused with different input** (`IDEMPOTENCY_KEY_PARAMETER_MISMATCH`): nothing changed. Use a new key for each new move.
+- **Concurrent request** (`IDEMPOTENCY_CONCURRENT_REQUEST`): retryable, in the same form as for `set_inventory_quantity`.
+- **Previous attempt failed** (`IDEMPOTENCY_PREVIOUS_ATTEMPT_FAILED`): an earlier call with this key failed, and Shopify won't use the key again. Nothing changed. Run a new Dry run and use a new key.
+
+Any other refusal is passed through with Shopify's message, and recorded by its codes. As for `set_inventory_quantity`, the compare-and-swap checks make sure a move is made at most once, even when a retry's Idempotency key doesn't; see [What retries really do](#what-retries-really-do).
+
 ### Rate limits
 
 Shopify limits each store with a bucket of query cost points. storewarden keeps one bucket per store and updates it from every response. It never hardcodes the limits.
@@ -371,7 +446,7 @@ The root of trust is the tailnet policy file. Anyone who can edit it can grant t
 | A granted Caller calls a Tool it isn't granted | `tools/list` hides it. `tools/call` answers exactly as for a Tool that doesn't exist, and writes a denial Audit record. |
 | A granted Caller is manipulated through its inputs (prompt injection) | Fixed Tools only, with no raw queries. Write mode off by default. Dry run by default. Compare-and-swap on every write. Keep Grants small. |
 | A write is retried or duplicated | The Idempotency key goes to Shopify's `@idempotent` directive, and compare-and-swap stops a second change. See [What retries really do](#what-retries-really-do). |
-| A stale read leads to a wrong write | `expected_quantity` becomes Shopify's `changeFromQuantity`, which is never null. |
+| A stale read leads to a wrong write | `expected_quantity`, and a move's `expected_from_quantity` and `expected_to_quantity`, become Shopify's `changeFromQuantity`, which is never null. |
 | Another device reuses a Caller's MCP session | Stateless MCP. Every request is identified on its own ([ADR 0001](docs/adr/0001-stateless-mcp-for-per-request-identity.md)). |
 | Public exposure | The only listener is tsnet's, inside the tailnet. No Funnel, serve config or host listener in the code, and `make never-public` fails the build if one appears. tsnet clears any saved serve config when the node starts. storewarden is built without tsnet's peer API server, which would otherwise listen on every host interface, and refuses to start if it isn't ([ADR 0003](docs/adr/0003-build-without-the-peer-api-server.md)). |
 | Credential leak | Secrets come only from the environment and are never logged or written to Audit records. The access token is kept only in memory. The app has no customer or order scopes. |
@@ -382,8 +457,8 @@ The root of trust is the tailnet policy file. Anyone who can edit it can grant t
 ### Accepted risks
 
 - **Quotas are per node: a Caller that can add tailnet nodes gets one Quota per node.** Each node is a separate Caller with its own Quota. Enough nodes together can still use up the Store's rate limit. The Audit records name every node.
-- **Someone with access to the host can change the audit log.** storewarden writes Audit records to a local file or stdout. It doesn't make them tamper-proof. Ship them off the host if you need that.
-- **A granted Writer can still set a wrong quantity.** The guards stop duplicate and stale writes, not a wrong number from a Caller that read the current one. The Audit records and Shopify's inventory history show who made each change.
+- **Someone with access to the host can change the audit log.** storewarden writes Audit records to a local file or stdout. It doesn't make them tamper-proof. Ship them off the host if you need that. Every real write and move is also in Shopify's inventory history, with a `storewarden://audit/<request_id>` reference to its Audit records, and no one on the host can change that.
+- **A granted Writer can still set a wrong quantity, or move the wrong units.** The guards stop duplicate and stale writes and moves, and a move of more units than the Caller read, not a wrong number or wrong Inventory state from a Caller that read the current ones. The Audit records and Shopify's inventory history show who made each change.
 
 ### Why plain HTTP on the tailnet is fine
 
@@ -413,7 +488,7 @@ Audit records are JSON Lines, one record per line. They go to stdout by default,
 | Field | Meaning |
 |---|---|
 | `time` | When the record was written, in UTC. |
-| `request_id` | The request's ID. The `attempt` and `result` records of one call share it. It is also `request_id` in `set_inventory_quantity`'s output and the end of its Shopify reference URI. |
+| `request_id` | The request's ID. The `attempt` and `result` records of one call share it. It is also `request_id` in a Write tool's output and the end of its Shopify reference URI. |
 | `phase` | `denied`, `attempt` or `result`. |
 | `caller.node_id` | The node's stable ID. |
 | `caller.node_name` | The node's tailnet name. |
@@ -423,8 +498,8 @@ Audit records are JSON Lines, one record per line. They go to stdout by default,
 | `args` | The arguments exactly as the Caller sent them. |
 | `decision` | `allow` or `deny`. |
 | `reason` | Why a request was denied. |
-| `dry_run` | For the Write tool, whether the call was a Dry run. `false` for Read tools. |
-| `idempotency_key` | For the Write tool, the Idempotency key, if any. |
+| `dry_run` | For a Write tool, whether the call was a Dry run. `false` for Read tools. |
+| `idempotency_key` | For a Write tool, the Idempotency key, if any. |
 | `outcome` | On a `result` record, `ok` or `error`. |
 | `error` | The error the Caller got, if any. A Shopify error is recorded by its codes only, such as `shopify: user errors, codes: INVALID_LOCATION`, because its message can quote Store data; the Caller still gets the message. |
 | `shopify.requested_cost` | Shopify's estimated query cost, summed over every request the call sent, including a throttled request and its retry. |
@@ -499,9 +574,9 @@ It gives you each policy file to paste.
 - a Grant with an unknown field gets HTTP 403 and an error log;
 - a Grant with no storewarden capability gets HTTP 403, while `/healthz` still works.
 
-**Part 2, every Tool and the Write tool**, grants one test Caller all five Tools and the other only the four Read tools. It checks that:
+**Part 2, every Tool and the Write tools**, grants one test Caller all six Tools and the other only the four Read tools. It checks that:
 
-- the fully granted Caller sees all five Tools;
+- the fully granted Caller sees all six Tools;
 - `search_products` returns a page and its `next_cursor` gets the next one;
 - `get_product` returns variants with inventory item IDs, and `get_inventory` returns quantities by location;
 - for the first stocked inventory item:
@@ -510,10 +585,17 @@ It gives you each policy file to paste.
   - retrying the same call with the same key doesn't change the quantity again;
   - a new change with the old `expected_quantity` gets the stale-quantity error and changes nothing;
   - the quantity is put back;
-- the change shows in Shopify's inventory history with its `storewarden://audit/<request_id>` reference. You check this one in the Shopify admin; the wizard prints the link;
-- the read-only Caller doesn't see `set_inventory_quantity`, and calling it gives `unknown tool "set_inventory_quantity"`;
+- for the same item, moving 1 unit from available to damaged:
+  - a move with no `dry_run` is a Dry run of both states and changes nothing;
+  - executing with an `idempotency_key` and both Expected quantities makes the move;
+  - retrying the same call with the same key doesn't move again;
+  - a new move with the old Expected quantities gets the stale-quantity error and changes nothing;
+  - a move of more than damaged holds is refused by storewarden, and, claiming damaged holds enough, what Shopify answers is recorded in the results;
+  - the unit is moved back;
+- the change and the move show in Shopify's inventory history with their `storewarden://audit/<request_id>` references, and the move with reason `damaged`. You check these in the Shopify admin; the wizard prints the link;
+- the read-only Caller doesn't see either Write tool, and calling them gives `unknown tool "set_inventory_quantity"` and `unknown tool "move_inventory_quantity"`;
 - SIGINT shuts storewarden down cleanly;
-- the Audit records are JSON with every field in [Audit records](#audit-records), include attempt and result records for every Tool and the denials, show the real write's Dry run, Idempotency key and Shopify request ID, and hold no Shopify response content.
+- the Audit records are JSON with every field in [Audit records](#audit-records), include attempt and result records for every Tool and the denials, show the real write's and the real move's Dry run, Idempotency key and Shopify request ID, the move's states and Expected quantities, and hold no Shopify response content.
 
 It ends with a table of results, which it can post to the smoke-test issue. It leaves the storewarden node, its state, the policy and the keys in place for the next run, and says how to remove them.
 

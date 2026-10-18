@@ -1,0 +1,42 @@
+{
+  "data": {
+    "inventoryMoveQuantities": {
+      "inventoryAdjustmentGroup": null,
+      "userErrors": [
+        {
+          "field": [
+            "input",
+            "changes",
+            "0",
+            "from",
+            "changeFromQuantity"
+          ],
+          "message": "The changeFromQuantity argument no longer matches the persisted quantity.",
+          "code": "CHANGE_FROM_QUANTITY_STALE"
+        },
+        {
+          "field": [
+            "input",
+            "changes",
+            "0",
+            "to",
+            "changeFromQuantity"
+          ],
+          "message": "The changeFromQuantity argument no longer matches the persisted quantity.",
+          "code": "CHANGE_FROM_QUANTITY_STALE"
+        }
+      ]
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 10,
+      "actualQueryCost": 10,
+      "throttleStatus": {
+        "maximumAvailable": 20000.0,
+        "currentlyAvailable": 19990,
+        "restoreRate": 1000.0
+      }
+    }
+  }
+}
