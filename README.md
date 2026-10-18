@@ -199,7 +199,7 @@ How storewarden reads the Grants:
 - **Typos deny.** A Grant value with an unknown field, such as `"tool"` instead of `"tools"`, denies the Caller and logs an error. A typo can't silently grant nothing.
 - **Unknown Tools warn.** A Tool name storewarden doesn't have is logged as a warning and ignored. The Write tools, `set_inventory_quantity` and `move_inventory_quantity`, are Tools storewarden has even while Write mode is off, so naming them never warns. The rest of the Grant still applies.
 - **Write mode wins.** The Write tools are allowed only when storewarden runs with `--allow-writes`. A Grant that names one is still valid while Write mode is off; it just allows nothing until Write mode is on, and it logs no warning.
-- **Each Write tool by name.** A Grant for `set_inventory_quantity` doesn't cover `move_inventory_quantity`, or the other way round. You can let an agent record damaged stock without letting it set counts.
+- **Each Write tool by name.** A Grant for `set_inventory_quantity` doesn't cover `move_inventory_quantity`, or the other way round. You can let a Caller record damaged stock without letting it set counts.
 
 Tagged devices are full Callers. They are the usual way to run headless Callers, such as agents on servers. A tagged device has no user, so `group:inventory` matches only the untagged devices of its members.
 

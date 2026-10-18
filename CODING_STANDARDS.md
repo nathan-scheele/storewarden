@@ -12,7 +12,7 @@ Errors, logs and Audit records say what happened. They carry no credentials, no 
 
 ## Never public
 
-storewarden is reachable only over the tailnet (`docs/design.md`, Listening; ADR 0003). Review every new socket, listener, tsnet option or dependency feature against that, including what the dependency does underneath (`docs/agents/dependency-notes.md`). Whatever depends on the Caller stays private to that Caller: per-Caller results are marked `cacheScope: "private"`, and no per-Caller state carries over between requests (ADR 0001).
+storewarden is reachable only over the tailnet (`docs/design.md`, Listening; ADR 0003). Review every new socket, listener, tsnet option or dependency feature against that, including what the dependency does underneath (`docs/agents/dependency-notes.md`). Whatever depends on the Caller stays private to that Caller: per-Caller results are marked `cacheScope: "private"`, and no per-Caller state carries over between requests (ADR 0001). The one exception is the Caller's Quota, kept in memory per node (ADR 0005); it never reaches another Caller.
 
 ## Reachable by a Caller
 
