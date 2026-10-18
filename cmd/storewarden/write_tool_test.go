@@ -153,6 +153,8 @@ func TestRealWriteNeedsAKeyAndAnExpectedQuantity(t *testing.T) {
 		"no expected":     {func(a map[string]any) { delete(a, "expected_quantity") }, "expected_quantity is required when dry_run is false"},
 		"neither":         {func(a map[string]any) { delete(a, "idempotency_key"); delete(a, "expected_quantity") }, "idempotency_key is required when dry_run is false"},
 		"negative amount": {func(a map[string]any) { a["quantity"] = -1 }, "quantity must be 0 or more"},
+		// Taking a missing quantity as 0 would empty the location.
+		"no quantity": {func(a map[string]any) { delete(a, "quantity") }, `missing properties: ["quantity"]`},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

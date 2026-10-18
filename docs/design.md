@@ -74,7 +74,7 @@ Names and tags are recorded for the audit trail only and never used to authorize
 
 - Read with `tailcfg.UnmarshalCapJSON`. Values from every matching Grant arrive as one flat list. The allowed set is the **union** of all `tools`.
 - Unknown JSON fields cause an error, so the Caller is denied and an error is logged. A typo shouldn't silently grant nothing.
-- A tool name in a Grant that storewarden doesn't have is logged as a warning and ignored.
+- A tool name in a Grant that storewarden doesn't have is logged as a warning and ignored. A Write tool counts as one storewarden has even when Write mode is off, so a policy that grants it doesn't warn; the Grant just allows nothing until Write mode is on.
 - WhoIs fails, or no capability at all → HTTP 403.
 
 ### Example policy
@@ -154,7 +154,13 @@ Write tools are guarded by two keys. They are only registered when the server st
    Shopify enforces both guarantees ([ADR 0002](adr/0002-write-tools-only-where-shopify-enforces-idempotency.md)). These errors are passed back to the Caller in plain words:
    - `CHANGE_FROM_QUANTITY_STALE` → "quantity changed since you read it; dry-run again".
    - `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` → "key reused with different input".
-   - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable.
+   - `IDEMPOTENCY_CONCURRENT_REQUEST` → retryable: the Tool error starts with `retryable: `.
+
+   Seen on the dev store (2026-10):
+   - The input type takes `changeFromQuantity`; it has no `compareQuantity`.
+   - A retry with the same key and input once returned the first call's result. Other retries, a few seconds and a minute after the first call, came back `CHANGE_FROM_QUANTITY_STALE` instead. So a Caller retrying a change that went through may get the stale-quantity error rather than the original result; the error tells it to dry-run, which shows whether the change was made.
+   - Identical requests with the same key sent at once never got `IDEMPOTENCY_CONCURRENT_REQUEST`: one applied and the rest got `CHANGE_FROM_QUANTITY_STALE`. That error's test response is therefore built from Shopify's documented code and message, not recorded.
+   - In every case the compare-and-swap check stopped a second change.
 
 ## Shopify client (`internal/shopify`)
 
