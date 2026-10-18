@@ -20,6 +20,7 @@ import (
 	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/tsnet"
 
+	"github.com/nathan-scheele/storewarden/internal/audit"
 	"github.com/nathan-scheele/storewarden/internal/shopify"
 )
 
@@ -38,6 +39,7 @@ func run() error {
 		hostname = flag.String("hostname", "storewarden", "tailnet node `name`")
 		stateDir = flag.String("state-dir", defaultStateDir(), "`directory` for the tailnet node's state")
 		tags     = flag.String("tags", "tag:storewarden", "comma-separated `tags` the node advertises")
+		auditLog = flag.String("audit-log", "-", "`file` to append Audit records to, or - for stdout")
 		debug    = flag.Bool("debug", false, "log at debug level, including tsnet's backend logs")
 	)
 	flag.Parse()
@@ -64,6 +66,18 @@ func run() error {
 	if clientID == "" || clientSecret == "" {
 		return errors.New("SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET must be set")
 	}
+
+	// Opened before the tailnet node starts, so the deferred Close runs
+	// last: after the HTTP server and the node have shut down.
+	records, err := audit.Open(*auditLog, logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := records.Close(); err != nil {
+			logger.Error("closing audit log", "error", err)
+		}
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -111,7 +125,7 @@ func run() error {
 
 	client := shopify.New("https://"+*store, clientID, clientSecret, &http.Client{Timeout: 30 * time.Second})
 	srv := &http.Server{
-		Handler:           newHandler(lc, client, logger),
+		Handler:           newHandler(lc, client, records, logger),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -134,7 +148,7 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("HTTP server shutdown", "error", err)
 	}
-	return nil // the deferred ts.Close runs next
+	return nil // the deferred ts.Close runs next, then the audit log's Close
 }
 
 func defaultStateDir() string {

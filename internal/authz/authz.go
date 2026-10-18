@@ -17,6 +17,8 @@ import (
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tailcfg/peercap"
+
+	"github.com/nathan-scheele/storewarden/internal/audit"
 )
 
 // Capability is the name Grants use to give Callers storewarden Tools.
@@ -37,6 +39,16 @@ type Caller struct {
 	User     string // login name, or "tagged" for a tagged node
 
 	allowed map[string]bool
+}
+
+// Audit returns the Caller as Audit records show it.
+func (c *Caller) Audit() audit.Caller {
+	return audit.Caller{
+		NodeID:   string(c.NodeID),
+		NodeName: c.NodeName,
+		Tags:     c.Tags,
+		User:     c.User,
+	}
 }
 
 // Allowed reports whether the Caller's Grants name the Tool.
@@ -68,30 +80,43 @@ func (g *grantValue) UnmarshalJSON(b []byte) error {
 	return dec.Decode((*plain)(g))
 }
 
-// HTTP returns middleware that identifies every request with WhoIs and puts
-// the Caller in the request context. A request whose Caller can't be
-// identified, or has no storewarden capability, gets HTTP 403.
+// HTTP returns middleware that gives every request a new audit request ID,
+// identifies it with WhoIs, and puts both in the request context. A request
+// whose Caller can't be identified, or has no storewarden capability, gets
+// HTTP 403 and a denial Audit record.
 // tools lists the Tools this server has; a Grant naming any other Tool is
 // logged as a warning.
-func HTTP(whois WhoIser, tools []string, logger *slog.Logger, next http.Handler) http.Handler {
+func HTTP(whois WhoIser, tools []string, log *audit.Log, logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, err := identify(r.Context(), whois, r.RemoteAddr, tools, logger)
+		ctx := audit.WithRequestID(r.Context(), audit.NewRequestID())
+		caller, err := identify(ctx, whois, r.RemoteAddr, tools, logger)
 		if err != nil {
 			logger.Info("request denied", "remote_addr", r.RemoteAddr, "reason", err.Error())
+			// The request is refused either way, so a failed write needs
+			// no handling here: audit.Log logs it and turns unhealthy.
+			log.Write(audit.Record{
+				RequestID: audit.RequestID(ctx),
+				Phase:     audit.Denied,
+				Caller:    caller.Audit(),
+				Decision:  audit.Deny,
+				Reason:    err.Error(),
+			})
 			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, caller)))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, callerKey{}, caller)))
 	})
 }
 
+// identify returns the Caller behind remoteAddr. When it denies the Caller,
+// it still returns whatever identity it learned, for the Audit record.
 func identify(ctx context.Context, whois WhoIser, remoteAddr string, tools []string, logger *slog.Logger) (*Caller, error) {
 	who, err := whois.WhoIs(ctx, remoteAddr)
 	if err != nil {
-		return nil, fmt.Errorf("whois: %w", err)
+		return &Caller{}, fmt.Errorf("whois: %w", err)
 	}
 	if who.Node == nil {
-		return nil, fmt.Errorf("whois: no node")
+		return &Caller{}, fmt.Errorf("whois: no node")
 	}
 	caller := &Caller{
 		NodeID:   who.Node.StableID,
@@ -106,12 +131,12 @@ func identify(ctx context.Context, whois WhoIser, remoteAddr string, tools []str
 	callerLog := logger.With("node_id", caller.NodeID, "node_name", caller.NodeName)
 
 	if !who.CapMap.HasCapability(Capability) {
-		return nil, fmt.Errorf("no %s capability", Capability)
+		return caller, fmt.Errorf("no %s capability", Capability)
 	}
 	values, err := tailcfg.UnmarshalCapJSON[grantValue](who.CapMap, Capability)
 	if err != nil {
 		callerLog.Error("invalid grant value in tailnet policy", "capability", Capability, "error", err)
-		return nil, fmt.Errorf("invalid grant value: %w", err)
+		return caller, fmt.Errorf("invalid grant value: %w", err)
 	}
 
 	// Every matching Grant's value arrives in one list; the Caller gets the
@@ -131,9 +156,9 @@ func identify(ctx context.Context, whois WhoIser, remoteAddr string, tools []str
 
 // MCP returns receiving middleware that hides the Tools a Caller isn't
 // granted from tools/list, and answers tools/call for them exactly as if the
-// Tool didn't exist. tools/call is checked on its own, so it doesn't rely on
-// the Caller having listed Tools first.
-func MCP() mcp.Middleware {
+// Tool didn't exist, with a denial Audit record. tools/call is checked on its
+// own, so it doesn't rely on the Caller having listed Tools first.
+func MCP(log *audit.Log) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			caller, ok := CallerFrom(ctx)
@@ -142,9 +167,19 @@ func MCP() mcp.Middleware {
 			}
 			switch method {
 			case "tools/call":
-				name := req.GetParams().(*mcp.CallToolParamsRaw).Name
-				if !caller.Allowed(name) {
-					return nil, unknownTool(name)
+				params := req.GetParams().(*mcp.CallToolParamsRaw)
+				if !caller.Allowed(params.Name) {
+					// Refused either way, as in HTTP.
+					log.Write(audit.Record{
+						RequestID: audit.RequestID(ctx),
+						Phase:     audit.Denied,
+						Caller:    caller.Audit(),
+						Tool:      params.Name,
+						Args:      params.Arguments,
+						Decision:  audit.Deny,
+						Reason:    "tool not granted",
+					})
+					return nil, unknownTool(params.Name)
 				}
 			case "tools/list":
 				res, err := next(ctx, method, req)
